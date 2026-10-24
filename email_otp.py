@@ -11,13 +11,13 @@ SMTP dengan password utama:
     MAIL_PASSWORD  = app password 16 karakter
     MAIL_FROM      = Tim 3 Kalkulator Pajak <alamat@gmail.com>
     MAIL_SERVER    = smtp.gmail.com
-    MAIL_PORT      = 587
-    MAIL_STARTTLS  = True
-    MAIL_SSL_TLS   = False
+    MAIL_PORT      = 465
+    MAIL_STARTTLS  = False
+    MAIL_SSL_TLS   = True
 
-Port 587 + STARTTLS dipakai secara sengaja: port 465 (SMTPS/implicit TLS)
-sering diblokir pada hosting gratis seperti Render, sehingga email tidak
-pernah terkirim walau kredensial benar.
+Port 465 + SSL implisit dipakai secara sengaja: port 587 (STARTTLS)
+diblokir/timeout di Render, sehingga email tidak pernah terkirim walau
+kredensial benar.
 
 Bila konfigurasi email belum diisi (mis. saat pengembangan lokal), kode OTP
 tetap dibuat dan dicetak ke log server agar alur registrasi bisa diuji tanpa
@@ -48,25 +48,25 @@ if "://" in MAIL_SERVER:
     MAIL_SERVER = MAIL_SERVER.split("://", 1)[1]
 MAIL_SERVER = MAIL_SERVER.split("/")[0].split(":")[0] or "smtp.gmail.com"
 
-# --- Port: SELALU STARTTLS di 587 -------------------------------------------
-# Bila env MAIL_PORT diisi 465 (atau MAIL_SSL_TLS=True), paksa kembali ke 587
-# + STARTTLS. Ini mencegah deploy lama/Render yang masih menyimpan 465 membuat
-# email gagal terkirim tanpa jejak yang jelas.
-_port_env = (os.environ.get("MAIL_PORT") or "587").strip()
+# --- Port: SSL implisit di 465 ---------------------------------------------
+# Port 587 (STARTTLS) diblokir/timeout di Render, jadi koneksi memakai port
+# 465 dengan SSL implisit. Nilai MAIL_PORT dari env tetap dibaca untuk
+# pelaporan, tetapi koneksi selalu memakai 465.
+_port_env = (os.environ.get("MAIL_PORT") or "465").strip()
 try:
-    MAIL_PORT = int(_port_env)
+    _port_dari_env = int(_port_env)
 except ValueError:
-    MAIL_PORT = 587
+    _port_dari_env = 465
 
-if MAIL_PORT != 587:
+if _port_dari_env != 465:
     print(
-        f"[EMAIL-WARN] MAIL_PORT={MAIL_PORT} diabaikan; dipaksa 587 (STARTTLS) "
-        "karena port 465 sering diblokir hosting gratis seperti Render."
+        f"[EMAIL-WARN] MAIL_PORT={_port_dari_env} diabaikan; dipaksa 465 (SSL) "
+        "karena port 587 diblokir/timeout di Render."
     )
-    MAIL_PORT = 587
 
-MAIL_STARTTLS = True
-MAIL_SSL_TLS = False
+MAIL_PORT = 465
+MAIL_STARTTLS = False
+MAIL_SSL_TLS = True
 
 APP_NAME = "Tim 3 Kalkulator Pajak"
 
@@ -162,9 +162,9 @@ def _konfigurasi():
     """
     Bangun ConnectionConfig fastapi-mail dari environment.
 
-    Selalu STARTTLS di port 587. Nilai MAIL_PORT/MAIL_STARTTLS/MAIL_SSL_TLS
-    sengaja tidak dibaca dari env agar konfigurasi 465 yang tersisa di hosting
-    tidak lagi membuat pengiriman gagal.
+    Koneksi memakai port 465 dengan SSL implisit (STARTTLS mati), karena port
+    587 diblokir/timeout di Render. MAIL_SERVER dan kredensial tetap diambil
+    dari env.
     """
     from fastapi_mail import ConnectionConfig
 
@@ -172,10 +172,10 @@ def _konfigurasi():
         MAIL_USERNAME=MAIL_USERNAME,
         MAIL_PASSWORD=MAIL_PASSWORD,
         MAIL_FROM=_MAIL_FROM_ADDRESS,
-        MAIL_PORT=587,
+        MAIL_PORT=465,
         MAIL_SERVER=MAIL_SERVER,
-        MAIL_STARTTLS=True,
-        MAIL_SSL_TLS=False,
+        MAIL_STARTTLS=False,
+        MAIL_SSL_TLS=True,
         MAIL_FROM_NAME=_MAIL_FROM_NAME,
         USE_CREDENTIALS=True,
         VALIDATE_CERTS=True,
@@ -252,7 +252,7 @@ async def kirim_otp_email(email: str, kode: str, username: str, menit: int = 5) 
         print("[EMAIL-ERROR] ==================== GAGAL KIRIM EMAIL ====================")
         print(f"[EMAIL-ERROR] Ke       : {email}")
         print(f"[EMAIL-ERROR] Dari     : {MAIL_FROM}")
-        print(f"[EMAIL-ERROR] Server   : {MAIL_SERVER}:587 (STARTTLS)")
+        print(f"[EMAIL-ERROR] Server   : {MAIL_SERVER}:465 (SSL)")
         print(f"[EMAIL-ERROR] Username : {MAIL_USERNAME or '(kosong)'}")
         print(f"[EMAIL-ERROR] Password : {'(terisi)' if MAIL_PASSWORD else '(KOSONG!)'}")
         print(f"[EMAIL-ERROR] Tipe     : {type(exc).__name__}")
@@ -266,7 +266,7 @@ async def kirim_otp_email(email: str, kode: str, username: str, menit: int = 5) 
         print("[EMAIL-ERROR] =======================================================")
         raise
 
-    print(f"[EMAIL-OK] OTP terkirim ke {email} via {MAIL_SERVER}:587 (STARTTLS)")
+    print(f"[EMAIL-OK] OTP terkirim ke {email} via {MAIL_SERVER}:465 (SSL)")
     return True
 
 
