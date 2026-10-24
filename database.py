@@ -389,6 +389,17 @@ def hapus_user(username: str) -> bool:
         return cur.rowcount > 0
 
 
+def update_password(email: str, hashed_password: str) -> bool:
+    """Perbarui hash password user berdasarkan email. Return True bila terupdate."""
+    with get_connection() as conn:
+        cur = conn.execute(
+            "UPDATE users SET hashed_password = ? WHERE lower(email) = lower(?)",
+            (hashed_password, email),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
 def jumlah_user() -> int:
     """Hitung jumlah user (dipakai untuk seeding admin default)."""
     with get_connection() as conn:

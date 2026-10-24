@@ -262,3 +262,17 @@ class VerifyOtpRequest(BaseModel):
 class PesanResponse(BaseModel):
     message: str
     detail: str = ""
+
+
+# ---------------------------------------------------------------------------
+# RESET PASSWORD
+# ---------------------------------------------------------------------------
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr = Field(..., description="Email akun yang lupa password")
+
+
+class ResetPasswordRequest(BaseModel):
+    email: EmailStr = Field(..., description="Email akun")
+    otp_code: str = Field(..., min_length=6, max_length=6, pattern=r"^\d{6}$")
+    new_password: str = Field(..., min_length=6, max_length=72)

@@ -33,9 +33,11 @@ import database
 import email_otp
 import services
 from schemas import (
+    ForgotPasswordRequest,
     HealthResponse,
     PesanResponse,
     RegisterRequest,
+    ResetPasswordRequest,
     VerifyOtpRequest,
     PPh21BulananRequest,
     PPh21BulananResponse,
@@ -365,6 +367,119 @@ def verify_otp(payload: VerifyOtpRequest):
     return {
         "message": "Verifikasi berhasil, akun sudah aktif",
         "detail": f"Silakan login dengan username {user['username']}.",
+    }
+
+
+# ---------------------------------------------------------------------------
+# LUPA / RESET PASSWORD
+# ---------------------------------------------------------------------------
+
+@app.post(
+    "/api/forgot-password",
+    response_model=PesanResponse,
+    tags=["Auth"],
+    summary="Kirim kode OTP untuk reset password",
+)
+async def forgot_password(payload: ForgotPasswordRequest):
+    """
+    Mengirim kode OTP ke email pemilik akun untuk keperluan reset password.
+
+    Sengaja TIDAK membocorkan apakah email terdaftar atau tidak: untuk email
+    yang tidak dikenal tetap mengembalikan pesan sukses yang sama, sehingga
+    penyerang tidak bisa memakai endpoint ini untuk memeriksa email mana yang
+    punya akun.
+    """
+    email = str(payload.email).strip()
+
+    database.bersihkan_otp_kedaluwarsa()
+
+    if database.ambil_user_by_email(email) is None:
+        return {
+            "message": "Jika email terdaftar, kode reset password telah dikirim",
+            "detail": "Periksa kotak masuk dan folder spam Anda.",
+        }
+
+    user = database.ambil_user_by_email(email)
+
+    kode = email_otp.buat_kode_otp()
+    database.simpan_otp(email, kode, ttl_minutes=database.OTP_TTL_MINUTES)
+
+    try:
+        terkirim = await email_otp.kirim_otp_email(
+            email=email,
+            kode=kode,
+            username=user["username"],
+            menit=database.OTP_TTL_MINUTES,
+        )
+    except Exception as exc:  # noqa: BLE001
+        database.hapus_otp(email)
+        print(f"[ERROR] Gagal mengirim OTP reset password ke {email}: {exc}")
+        raise HTTPException(
+            status_code=503,
+            detail="Gagal mengirim email reset password. Coba lagi beberapa saat.",
+        ) from exc
+
+    if terkirim:
+        detail = "Kode reset password telah dikirim ke email Anda."
+    else:
+        detail = (
+            "SMTP belum dikonfigurasi di server. Kode OTP dicetak di log "
+            "server untuk keperluan pengujian."
+        )
+
+    return {
+        "message": "Jika email terdaftar, kode reset password telah dikirim",
+        "detail": detail,
+    }
+
+
+@app.post(
+    "/api/reset-password",
+    response_model=PesanResponse,
+    tags=["Auth"],
+    summary="Verifikasi OTP lalu ganti password",
+)
+def reset_password(payload: ResetPasswordRequest):
+    """
+    Memeriksa OTP lalu mengganti password user menjadi ``new_password``.
+
+    Password baru disimpan sebagai hash bcrypt; password lama langsung tidak
+    berlaku karena hash-nya ditimpa (token JWT lama tetap valid sampai
+    kedaluwarsa — ini konsekuensi token stateless).
+    """
+    email = str(payload.email).strip()
+    kode = payload.otp_code.strip()
+
+    galat_pw = email_otp.validasi_password_kuat(payload.new_password)
+    if galat_pw:
+        raise HTTPException(status_code=422, detail=galat_pw)
+
+    if database.ambil_user_by_email(email) is None:
+        raise HTTPException(status_code=404, detail="Email tidak terdaftar")
+
+    otp = database.ambil_otp(email)
+    if otp is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Kode OTP tidak ditemukan. Silakan minta kode baru.",
+        )
+    if database.otp_kedaluwarsa(otp["expires_at"]):
+        database.hapus_otp(email)
+        raise HTTPException(
+            status_code=410,
+            detail="Kode OTP sudah kedaluwarsa. Silakan minta kode baru.",
+        )
+    if not secrets.compare_digest(str(otp["code"]), str(kode)):
+        raise HTTPException(status_code=400, detail="Kode OTP salah")
+
+    if not database.update_password(email, auth.hash_password(payload.new_password)):
+        raise HTTPException(status_code=404, detail="Email tidak terdaftar")
+
+    database.hapus_otp(email)
+
+    return {
+        "message": "Password berhasil diubah",
+        "detail": "Silakan login dengan password baru Anda.",
     }
 
 
