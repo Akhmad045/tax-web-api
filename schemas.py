@@ -213,3 +213,32 @@ class RiwayatItem(BaseModel):
 class RiwayatDaftarResponse(BaseModel):
     total: int
     items: List[RiwayatItem]
+# ---------------------------------------------------------------------------
+# AUTENTIKASI & USER
+# ---------------------------------------------------------------------------
+
+class Token(BaseModel):
+    access_token: str = Field(..., description="JWT access token")
+    token_type: str = Field("bearer", description="Selalu 'bearer'")
+    expires_in: int = Field(..., description="Masa berlaku token (detik)")
+    username: str = Field(..., description="Username yang login")
+    role: str = Field(..., description="Role pengguna: admin | user")
+
+
+class UserInfo(BaseModel):
+    id: int
+    username: str
+    role: str
+    is_active: bool = True
+    dibuat_pada: str = ""
+
+
+class UserBuatRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=50)
+    password: str = Field(..., min_length=6, max_length=72)
+    role: str = Field("user", description="admin | user")
+
+
+class UserDaftarResponse(BaseModel):
+    total: int
+    items: List[UserInfo]

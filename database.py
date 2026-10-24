@@ -77,6 +77,22 @@ def init_db() -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_riwayat_dibuat ON riwayat(dibuat_pada DESC)"
         )
+        # tabel user untuk autentikasi & RBAC
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                username        TEXT    NOT NULL UNIQUE,
+                hashed_password TEXT    NOT NULL,
+                role            TEXT    NOT NULL DEFAULT 'user',
+                is_active       INTEGER NOT NULL DEFAULT 1,
+                dibuat_pada     TEXT    NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)"
+        )
         conn.commit()
 
 
@@ -197,3 +213,88 @@ def hapus_riwayat(riwayat_id: int) -> bool:
         cur = conn.execute("DELETE FROM riwayat WHERE id = ?", (riwayat_id,))
         conn.commit()
         return cur.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# USER & AUTENTIKASI
+# ---------------------------------------------------------------------------
+
+ROLE_VALID = ("admin", "user")
+
+
+def _user_ke_dict(row: sqlite3.Row, sertakan_hash: bool = False) -> Dict[str, Any]:
+    """Konversi baris users menjadi dict. Hash hanya disertakan bila diminta."""
+    data: Dict[str, Any] = {
+        "id": row["id"],
+        "username": row["username"],
+        "role": row["role"],
+        "is_active": bool(row["is_active"]),
+        "dibuat_pada": row["dibuat_pada"],
+    }
+    if sertakan_hash:
+        data["hashed_password"] = row["hashed_password"]
+    return data
+
+
+def ambil_user_by_username(
+    username: str, sertakan_hash: bool = True
+) -> Optional[Dict[str, Any]]:
+    """Ambil user berdasarkan username (case-sensitive)."""
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM users WHERE username = ?", (username,)
+        ).fetchone()
+    return _user_ke_dict(row, sertakan_hash=sertakan_hash) if row else None
+
+
+def buat_user(
+    username: str, hashed_password: str, role: str = "user"
+) -> Dict[str, Any]:
+    """
+    Buat user baru. Raise ValueError bila username sudah dipakai
+    atau role tidak valid.
+    """
+    if role not in ROLE_VALID:
+        raise ValueError(
+            f"Role tidak valid: {role!r}. Pilihan: {', '.join(ROLE_VALID)}"
+        )
+    if not username or not hashed_password:
+        raise ValueError("Username dan password wajib diisi")
+
+    dibuat_pada = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    try:
+        with get_connection() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO users (username, hashed_password, role, is_active, dibuat_pada)
+                VALUES (?, ?, ?, 1, ?)
+                """,
+                (username, hashed_password, role, dibuat_pada),
+            )
+            conn.commit()
+            user_id = cur.lastrowid
+    except sqlite3.IntegrityError as exc:
+        raise ValueError(f"Username {username!r} sudah terdaftar") from exc
+
+    user = ambil_user_by_username(username, sertakan_hash=False)
+    if user is None:  # pragma: no cover
+        raise RuntimeError(f"Gagal membaca user yang baru dibuat (id={user_id})")
+    return user
+
+
+def jumlah_user() -> int:
+    """Hitung jumlah user (dipakai untuk seeding admin default)."""
+    with get_connection() as conn:
+        row = conn.execute("SELECT COUNT(*) AS n FROM users").fetchone()
+    return int(row["n"]) if row else 0
+
+
+def daftar_user() -> List[Dict[str, Any]]:
+    """Daftar seluruh user (tanpa hash password)."""
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT id, username, role, is_active, dibuat_pada "
+            "FROM users ORDER BY id ASC"
+        ).fetchall()
+    return [_user_ke_dict(r) for r in rows]
+

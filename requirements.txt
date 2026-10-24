@@ -7,3 +7,16 @@
 fastapi>=0.115,<1.0
 uvicorn[standard]>=0.30,<1.0
 pydantic>=2.7,<3.0
+
+# --- Autentikasi & RBAC ---
+# python-jose: pembuatan & verifikasi JWT.
+python-jose[cryptography]>=3.3,<4.0
+
+# bcrypt dipakai LANGSUNG untuk hashing password.
+# Sengaja tanpa passlib: passlib 1.7.4 membaca atribut internal bcrypt yang
+# dihapus di bcrypt 5.x sehingga hashing gagal dengan
+# "password cannot be longer than 72 bytes". Pin <6 agar tidak ada kejutan.
+bcrypt>=4.0,<6.0
+
+# python-multipart: wajib agar OAuth2PasswordRequestForm bisa membaca form login.
+python-multipart>=0.0.9,<1.0
