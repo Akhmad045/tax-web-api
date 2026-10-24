@@ -33,7 +33,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 BREVO_API_KEY = os.environ.get("BREVO_API_KEY", "").strip()
-BREVO_SENDER = os.environ.get("BREVO_SENDER", "").strip()
+# Alamat pengirim WAJIB alamat yang sudah diverifikasi sebagai sender di Brevo.
+BREVO_SENDER = (
+    os.environ.get("BREVO_SENDER", "").strip()
+    or "akhmadfitriyanramadhan23@gmail.com"
+)
 BREVO_SENDER_NAME = (
     os.environ.get("BREVO_SENDER_NAME", "").strip() or "Tim 3 Kalkulator Pajak"
 )
@@ -83,25 +87,6 @@ def buat_kode_otp(panjang: int = 6) -> str:
     return "".join(str(secrets.randbelow(10)) for _ in range(panjang))
 
 
-def _html_otp(kode: str, username: str, menit: int) -> str:
-    """Template HTML sederhana untuk email OTP."""
-    return f"""\
-<div style="font-family:Arial,Helvetica,sans-serif;max-width:480px;margin:0 auto;
-            padding:24px;border:1px solid #e2e8f0;border-radius:12px">
-  <h2 style="color:#1d4ed8;margin:0 0 12px">Verifikasi Email</h2>
-  <p style="color:#334155;margin:0 0 16px">
-    Hai <strong>{username}</strong>, gunakan kode berikut untuk menyelesaikan
-    pendaftaran akun Tim 3 Kalkulator Pajak:
-  </p>
-  <p style="font-size:32px;font-weight:bold;letter-spacing:8px;color:#0f172a;
-            text-align:center;background:#f1f5f9;padding:16px;border-radius:8px;
-            margin:0 0 16px">{kode}</p>
-  <p style="color:#64748b;font-size:13px;margin:0">
-    Kode berlaku {menit} menit. Abaikan email ini bila Anda tidak mendaftar.
-  </p>
-</div>"""
-
-
 def kirim_otp_email(
     email_tujuan: str,
     kode_otp: str,
@@ -138,21 +123,12 @@ def kirim_otp_email(
 
     payload = {
         "sender": {
-            "name": BREVO_SENDER_NAME,
+            "name": "Tim 3 Kalkulator Pajak",
             "email": BREVO_SENDER,
         },
         "to": [{"email": email_tujuan}],
-        "subject": "Kode Verifikasi OTP Kalkulator Pajak",
-        # Spesifikasi awal cukup satu baris; detail (nama & masa berlaku)
-        # ditambahkan agar pengguna tidak bingung.
-        "htmlContent": (
-            f"<p>Kode OTP Anda adalah: <b>{kode_otp}</b></p>"
-            + (
-                _html_otp(kode_otp, username, menit)
-                if username
-                else f"<p>Kode berlaku {menit} menit.</p>"
-            )
-        ),
+        "subject": "Kode OTP Anda",
+        "htmlContent": f"<p>Kode OTP Anda adalah: <b>{kode_otp}</b></p>",
     }
 
     try:
