@@ -1,0 +1,10 @@
+# Dependensi khusus pengembangan & pengujian.
+# Tidak dipakai di produksi (Render hanya memasang requirements.txt).
+#
+# Instal:
+#   pip install -r requirements.txt -r requirements-dev.txt
+#
+# Jalankan tes:
+#   python -m pytest -q
+
+pytest>=8.0,<9.0

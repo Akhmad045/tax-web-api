@@ -1,11 +1,15 @@
 # Virtual environment Python
 venv/
 .venv/
+.tmpv/
 
 # Cache bytecode
 __pycache__/
 *.pyc
 *.pyo
+
+# Cache pytest
+.pytest_cache/
 
 # Database SQLite lokal (data runtime, jangan di-commit)
 tax.db
