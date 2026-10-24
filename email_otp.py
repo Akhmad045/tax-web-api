@@ -32,7 +32,6 @@ from dotenv import load_dotenv
 # Muat .env bila ada (tidak menimpa env yang sudah diset sistem).
 load_dotenv()
 
-BREVO_API_KEY = os.environ.get("BREVO_API_KEY", "").strip()
 # Alamat pengirim WAJIB alamat yang sudah diverifikasi sebagai sender di Brevo.
 BREVO_SENDER = (
     os.environ.get("BREVO_SENDER", "").strip()
@@ -49,9 +48,23 @@ BREVO_URL = "https://api.brevo.com/v3/smtp/email"
 BREVO_TIMEOUT = 20.0
 
 
+def _api_key() -> str:
+    """
+    Ambil kunci API Brevo langsung dari environment SAAT INI.
+
+    Sengaja dibaca per-panggilan, bukan hanya sekali saat modul di-import:
+    nilai lama yang ter-cache bisa membuat header mengirim kunci kosong/basi
+    (penyebab 401 "Key not found") meski Environment di Render sudah diubah.
+    Nilai juga dibersihkan dari spasi, newline, atau tanda kutip yang sering
+    ikut tersalin saat menempel kunci di dashboard.
+    """
+    nilai = os.getenv("BREVO_API_KEY") or os.environ.get("BREVO_API_KEY") or ""
+    return nilai.strip().strip('"').strip("'").strip()
+
+
 def email_terkonfigurasi() -> bool:
     """True bila kunci API Brevo sudah tersedia."""
-    return bool(BREVO_API_KEY)
+    return bool(_api_key())
 
 
 def _peringatan_konfigurasi() -> None:
@@ -61,7 +74,7 @@ def _peringatan_konfigurasi() -> None:
     Ditampilkan lebih awal agar langsung terlihat di Logs Render setelah
     restart, bukan menunggu percobaan registrasi gagal.
     """
-    if not BREVO_API_KEY:
+    if not _api_key():
         print(
             "[EMAIL-WARN] BREVO_API_KEY belum diisi. Email OTP tidak akan "
             "dikirim; kode hanya dicetak ke log ([OTP-DEV])."
@@ -106,18 +119,31 @@ def kirim_otp_email(
     Bila pengiriman gagal, respons/kesalahan asli dicetak ke terminal
     (terlihat di Render -> Logs) lalu exception dilempar ulang.
     """
-    if not email_terkonfigurasi():
+    # DEBUG: tampilkan 10 karakter pertama kunci di log Render.
+    # Kunci Brevo selalu diawali "xkeysib-". Bila output kosong, env belum
+    # terpasang; bila berbeda, nilainya salah salin. Hanya prefix yang
+    # dicetak agar kunci tidak bocor utuh ke log.
+    print("DEBUG API KEY:", (os.getenv("BREVO_API_KEY") or "")[:10])
+
+    api_key = _api_key()
+    if not api_key:
         print(
             f"[OTP-DEV] BREVO_API_KEY belum diisi. Kode untuk {email_tujuan}: "
             f"{kode_otp} (berlaku {menit} menit). Email TIDAK dikirim."
         )
         return False
 
+    if not api_key.startswith("xkeysib-"):
+        print(
+            "[EMAIL-WARN] BREVO_API_KEY tidak diawali 'xkeysib-'. Kemungkinan "
+            "bukan API key (mis. kunci SMTP) sehingga Brevo membalas 401."
+        )
+
     import httpx
 
     headers = {
         "accept": "application/json",
-        "api-key": BREVO_API_KEY,
+        "api-key": api_key,
         "content-type": "application/json",
     }
 
@@ -144,7 +170,7 @@ def kirim_otp_email(
         print(f"[EMAIL-ERROR] URL      : {BREVO_URL}")
         print(f"[EMAIL-ERROR] Ke       : {email_tujuan}")
         print(f"[EMAIL-ERROR] Dari     : {BREVO_SENDER_NAME} <{BREVO_SENDER}>")
-        print(f"[EMAIL-ERROR] API key  : {'(terisi)' if BREVO_API_KEY else '(KOSONG!)'}")
+        print(f"[EMAIL-ERROR] API key  : {'(terisi)' if api_key else '(KOSONG!)'}")
         print(f"[EMAIL-ERROR] Tipe     : {type(exc).__name__}")
         print(f"[EMAIL-ERROR] Pesan    : {exc}")
 
