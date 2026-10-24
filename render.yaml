@@ -1,0 +1,39 @@
+# render.yaml — Blueprint deploy backend FastAPI ke Render (free tier)
+#
+# Cara pakai:
+#   1. Push repo ke GitHub.
+#   2. Render Dashboard -> New + -> Blueprint -> pilih repo ini.
+#   3. Render membaca file ini dan membuat service otomatis.
+#
+# Catatan free tier:
+#   - Service "spin down" setelah idle; request pertama bisa lambat (cold start).
+#   - Filesystem bersifat EPHEMERAL: file SQLite (tax.db) hilang setiap
+#     redeploy/restart. Untuk data permanen, tambahkan `disk:` di bawah
+#     (butuh paket berbayar) lalu set TAX_DB_PATH ke path disk tersebut.
+
+services:
+  - type: web
+    name: tax-web-api
+    runtime: python
+    plan: free
+    region: singapore
+    branch: main
+    # Render otomatis mengisi $PORT. Wajib bind ke 0.0.0.0, bukan 127.0.0.1.
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      # Origin frontend yang diizinkan (dipisah koma).
+      # Isi env ini agar bisa diubah dari dashboard Render tanpa ubah kode.
+      - key: CORS_ORIGINS
+        value: https://tim3kalkulatorpajak.web.id,https://www.tim3kalkulatorpajak.web.id,http://localhost:5173
+      # Kosongkan/abaikan bila tidak memakai Render Disk.
+      # - key: TAX_DB_PATH
+      #   value: /var/data/tax.db
+    # disk:
+    #   name: tax-data
+    #   mountPath: /var/data
+    #   sizeGB: 1

@@ -1,0 +1,24 @@
+# Virtual environment Python
+venv/
+.venv/
+
+# Cache bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# Database SQLite lokal (data runtime, jangan di-commit)
+tax.db
+*.db
+*.sqlite
+*.sqlite3
+
+# Environment variables
+.env
+
+# Editor / OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
