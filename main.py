@@ -262,7 +262,7 @@ def _kirim_otp_latar(
         terkirim = email_otp.kirim_otp_email(
             email_tujuan=email,
             kode_otp=kode,
-            username=username,
+            nama_user=username,
             menit=menit,
         )
     except Exception as exc:  # noqa: BLE001

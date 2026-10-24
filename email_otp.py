@@ -23,6 +23,7 @@ dibuat dan dicetak ke log server agar alur registrasi bisa diuji tanpa Brevo.
 
 from __future__ import annotations
 
+import html
 import os
 import secrets
 from typing import Optional
@@ -100,10 +101,32 @@ def buat_kode_otp(panjang: int = 6) -> str:
     return "".join(str(secrets.randbelow(10)) for _ in range(panjang))
 
 
+def _html_otp(kode_otp: str, nama_user: str, menit: int = 5) -> str:
+    """
+    Template HTML email OTP.
+
+    Semua styling memakai inline CSS karena Gmail dan klien email lain
+    membuang tag ``<style>`` di ``<head>``. Nilai yang disisipkan sudah
+    di-escape agar username/kode tidak bisa menyuntikkan markup.
+    """
+    nama_aman = html.escape(str(nama_user))
+    kode_aman = html.escape(str(kode_otp))
+    return f"""\
+<div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 8px;">
+    <h2 style="color: #1a56db; text-align: center;">Verifikasi Email</h2>
+    <p style="color: #333; font-size: 16px;">Hai <strong>{nama_aman}</strong>,</p>
+    <p style="color: #333; font-size: 16px;">Gunakan kode berikut untuk menyelesaikan pendaftaran akun Tim 3 Kalkulator Pajak:</p>
+    <div style="background-color: #f3f4f6; padding: 20px; text-align: center; border-radius: 8px; margin: 20px 0;">
+        <span style="font-size: 32px; font-weight: bold; letter-spacing: 8px; color: #111827;">{kode_aman}</span>
+    </div>
+    <p style="color: #6b7280; font-size: 14px;">Kode berlaku {menit} menit. Abaikan email ini bila Anda tidak mendaftar.</p>
+</div>"""
+
+
 def kirim_otp_email(
     email_tujuan: str,
     kode_otp: str,
-    username: str = "",
+    nama_user: str = "",
     menit: int = 5,
 ) -> bool:
     """
@@ -111,6 +134,9 @@ def kirim_otp_email(
 
     Fungsi ini SINKRON (memakai ``httpx.post``). Pemanggil menjalankannya di
     ``BackgroundTasks``, jadi request pengguna tetap tidak menunggu jaringan.
+
+    ``nama_user`` diambil dari data pendaftaran (username). Bila kosong,
+    dipakai sapaan netral agar email tidak menampilkan "Hai ,".
 
     Return True bila Brevo menerima (HTTP 2xx). Bila ``BREVO_API_KEY`` belum
     diisi, kode dicetak ke log dan False dikembalikan (bukan exception) agar
@@ -154,7 +180,7 @@ def kirim_otp_email(
         },
         "to": [{"email": email_tujuan}],
         "subject": "Kode OTP Anda",
-        "htmlContent": f"<p>Kode OTP Anda adalah: <b>{kode_otp}</b></p>",
+        "htmlContent": _html_otp(kode_otp, nama_user or "Pengguna", menit),
     }
 
     try:
