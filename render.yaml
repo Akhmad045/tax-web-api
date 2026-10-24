@@ -42,11 +42,13 @@ services:
       - key: JWT_EXPIRE_MINUTES
         value: "480"
       # Akun admin default dibuat otomatis saat tabel users masih kosong.
-      # Disarankan mengisi ADMIN_PASSWORD sendiri di dashboard Render.
+      # WAJIB diisi (sync: false -> diisi manual di dashboard Render) atau
+      # generateValue: true. Tanpa nilai, backend TIDAK membuat akun admin
+      # (fail closed) — tidak ada lagi password default di dalam kode.
       - key: ADMIN_USERNAME
         value: akhmad23
       - key: ADMIN_PASSWORD
-        sync: false
+        generateValue: true
       # --- Email (HTTP API Brevo) untuk verifikasi OTP registrasi ---
       # SMTP tidak dipakai karena port 25/465/587 diblokir di Render.
       # Kedua nilai rahasia diset lewat dashboard Render (sync: false).
@@ -59,6 +61,9 @@ services:
       #   value: Tim 3 Kalkulator Pajak
       # Masa berlaku kode OTP dalam menit.
       - key: OTP_TTL_MINUTES
+        value: "5"
+      # Batas tebakan salah sebelum kode OTP dihapus (anti brute force).
+      - key: OTP_MAKS_PERCOBAAN
         value: "5"
     # disk:
     #   name: tax-data

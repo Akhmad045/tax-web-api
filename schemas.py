@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 # ---------------------------------------------------------------------------
 # Enum status PTKP (dipakai sebagai validasi Literal sederhana)
@@ -18,11 +18,23 @@ from pydantic import BaseModel, EmailStr, Field
 StatusPTKP = str  # divalidasi di service (TK/0, K/0, K/1, K/2, K/3)
 
 
+class _NumericModel(BaseModel):
+    """
+    Base untuk model berisi nominal uang.
+
+    ``allow_inf_nan=False`` menolak ``NaN``/``Infinity``. Tanpa ini, payload
+    seperti ``{"gaji_pokok": "Infinity"}`` lolos validasi ``ge=0`` lalu merusak
+    perhitungan dan menyimpan nilai bukan-angka ke database.
+    """
+
+    model_config = ConfigDict(allow_inf_nan=False)
+
+
 # ---------------------------------------------------------------------------
 # REQUEST MODELS
 # ---------------------------------------------------------------------------
 
-class PPh21BulananRequest(BaseModel):
+class PPh21BulananRequest(_NumericModel):
     gaji_pokok: float = Field(..., ge=0, description="Gaji pokok per bulan (Rupiah)")
     tunjangan: float = Field(0, ge=0, description="Tunjangan per bulan (Rupiah)")
     bpjs: float = Field(0, ge=0, description="Potongan BPJS per bulan (Rupiah)")
@@ -34,7 +46,7 @@ class PPh21BulananRequest(BaseModel):
     )
 
 
-class BulanItem(BaseModel):
+class BulanItem(_NumericModel):
     """Data penghasilan & potongan untuk satu bulan."""
 
     gaji_pokok: float = Field(0, ge=0, description="Gaji pokok bulan ini")
@@ -57,11 +69,11 @@ class PPh21TahunanRequest(BaseModel):
     bulanan: List[BulanItem] = Field(
         ...,
         min_length=1,
-        description="List data penghasilan per bulan (idealnya 12 bulan)",
+        max_length=12,
+        description="List data penghasilan per bulan (maksimal 12 bulan)",
     )
 
-
-class PPhBadanRequest(BaseModel):
+class PPhBadanRequest(_NumericModel):
     omzet: float = Field(..., ge=0, description="Peredaran bruto dari kegiatan usaha utama")
     omzet_lain: float = Field(0, ge=0, description="Peredaran bruto dari kegiatan lain")
     biaya: float = Field(..., ge=0, description="Total biaya (dapat dikurangkan)")
@@ -173,7 +185,7 @@ class HealthResponse(BaseModel):
 # RIWAYAT (simpan data & riwayat perhitungan)
 # ---------------------------------------------------------------------------
 
-class RiwayatSimpanRequest(BaseModel):
+class RiwayatSimpanRequest(_NumericModel):
     """
     Payload untuk menyimpan satu perhitungan ke database.
 
@@ -207,6 +219,7 @@ class RiwayatItem(BaseModel):
     ringkasan: str
     total_pph: float
     dibuat_pada: str
+    username: str = ""
     detail: dict = Field(default_factory=dict)
 
 
@@ -235,7 +248,7 @@ class UserInfo(BaseModel):
 
 class UserBuatRequest(BaseModel):
     username: str = Field(..., min_length=3, max_length=50)
-    password: str = Field(..., min_length=6, max_length=72)
+    password: str = Field(..., min_length=8, max_length=72)
     role: str = Field("user", description="admin | user")
 
 
@@ -251,7 +264,7 @@ class UserDaftarResponse(BaseModel):
 class RegisterRequest(BaseModel):
     username: str = Field(..., min_length=3, max_length=50)
     email: EmailStr = Field(..., description="Email tujuan pengiriman OTP")
-    password: str = Field(..., min_length=6, max_length=72)
+    password: str = Field(..., min_length=8, max_length=72)
 
 
 class VerifyOtpRequest(BaseModel):
@@ -281,4 +294,4 @@ class ResendOtpRequest(BaseModel):
 class ResetPasswordRequest(BaseModel):
     email: EmailStr = Field(..., description="Email akun")
     otp_code: str = Field(..., min_length=6, max_length=6, pattern=r"^\d{6}$")
-    new_password: str = Field(..., min_length=6, max_length=72)
+    new_password: str = Field(..., min_length=8, max_length=72)

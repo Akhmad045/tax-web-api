@@ -122,7 +122,18 @@ def _startup() -> None:
 
     if database.jumlah_user() == 0:
         admin_username = os.environ.get("ADMIN_USERNAME", "akhmad23")
-        admin_password = os.environ.get("ADMIN_PASSWORD", "akhmadramadhan23")
+        # JANGAN pakai password default yang tertulis di kode: kredensial itu
+        # sudah publik (ada di repo ini) sehingga siapa pun bisa login sebagai
+        # admin. Tanpa env ADMIN_PASSWORD, akun admin tidak dibuat sama sekali
+        # (fail closed) dan pesan ini muncul di log Render.
+        admin_password = os.environ.get("ADMIN_PASSWORD", "").strip()
+        if not admin_password:
+            print(
+                "[PERINGATAN] ADMIN_PASSWORD belum diset. Akun admin awal TIDAK "
+                "dibuat. Set env ADMIN_PASSWORD (min. 8 karakter) di dashboard "
+                "Render lalu redeploy, atau buat user lewat POST /api/users."
+            )
+            return
         try:
             database.buat_user(
                 username=admin_username,
@@ -380,7 +391,19 @@ def verify_otp(payload: VerifyOtpRequest):
         )
     # Perbandingan constant-time agar tidak bisa ditebak lewat timing.
     if not secrets.compare_digest(str(otp["code"]), str(kode)):
-        raise HTTPException(status_code=400, detail="Kode OTP salah")
+        # Setiap tebakan salah dihitung; setelah batas tercapai kode dihapus
+        # agar tidak bisa dicoba terus sampai dapat (brute force 6 digit).
+        percobaan = database.tambah_percobaan_otp(email)
+        if percobaan >= database.OTP_MAKS_PERCOBAAN:
+            raise HTTPException(
+                status_code=429,
+                detail="Terlalu banyak percobaan salah. Minta kode OTP baru.",
+            )
+        sisa = database.OTP_MAKS_PERCOBAAN - percobaan
+        raise HTTPException(
+            status_code=400,
+            detail=f"Kode OTP salah. Sisa percobaan: {sisa}.",
+        )
 
     # OTP benar, tapi user belum tersimpan. Karena /api/register menahan
     # pembuatan user, data pendaftaran perlu diambil dari tempat lain.
@@ -557,7 +580,17 @@ def reset_password(payload: ResetPasswordRequest):
             detail="Kode OTP sudah kedaluwarsa. Silakan minta kode baru.",
         )
     if not secrets.compare_digest(str(otp["code"]), str(kode)):
-        raise HTTPException(status_code=400, detail="Kode OTP salah")
+        percobaan = database.tambah_percobaan_otp(email)
+        if percobaan >= database.OTP_MAKS_PERCOBAAN:
+            raise HTTPException(
+                status_code=429,
+                detail="Terlalu banyak percobaan salah. Minta kode OTP baru.",
+            )
+        sisa = database.OTP_MAKS_PERCOBAAN - percobaan
+        raise HTTPException(
+            status_code=400,
+            detail=f"Kode OTP salah. Sisa percobaan: {sisa}.",
+        )
 
     if not database.update_password(email, auth.hash_password(payload.new_password)):
         raise HTTPException(status_code=404, detail="Email tidak terdaftar")
@@ -640,6 +673,12 @@ def tambah_user(
     payload: UserBuatRequest,
     _admin: dict = Depends(auth.get_current_admin_user),
 ):
+    # Skema Pydantic hanya mengecek panjang; cek kekuatan (huruf besar, angka,
+    # tanpa spasi) juga diterapkan agar akun baru tidak lebih lemah dari
+    # akun hasil registrasi mandiri.
+    galat_pw = email_otp.validasi_password_kuat(payload.password)
+    if galat_pw:
+        raise HTTPException(status_code=422, detail=galat_pw)
     try:
         return database.buat_user(
             username=payload.username,
@@ -661,7 +700,17 @@ def tambah_user(
     tags=["Riwayat"],
     summary="Simpan satu perhitungan ke database",
 )
-def simpan_riwayat(payload: RiwayatSimpanRequest):
+def simpan_riwayat(
+    payload: RiwayatSimpanRequest,
+    user: dict = Depends(auth.get_current_user),
+):
+    """
+    Simpan perhitungan atas nama user yang sedang login.
+
+    Wajib login: tanpa ini siapa pun bisa menyuntikkan data sampah ke
+    database. Username diambil dari token, BUKAN dari body request, agar
+    pengguna tidak bisa memalsukan pemilik data.
+    """
     try:
         return database.simpan_riwayat(
             modul=payload.modul,
@@ -673,6 +722,7 @@ def simpan_riwayat(payload: RiwayatSimpanRequest):
             ringkasan=payload.ringkasan,
             total_pph=payload.total_pph,
             detail=payload.detail,
+            username=user["username"],
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -682,7 +732,7 @@ def simpan_riwayat(payload: RiwayatSimpanRequest):
     "/api/riwayat",
     response_model=RiwayatDaftarResponse,
     tags=["Riwayat"],
-    summary="Daftar riwayat perhitungan (khusus admin)",
+    summary="Daftar riwayat perhitungan (admin: semua, user: miliknya sendiri)",
 )
 def daftar_riwayat(
     modul: Optional[str] = Query(
@@ -690,7 +740,7 @@ def daftar_riwayat(
         description="Filter modul: pph21_bulanan | pph21_tahunan | pph_badan",
     ),
     limit: int = Query(50, ge=1, le=200, description="Jumlah maksimum baris"),
-    _admin: dict = Depends(auth.get_current_admin_user),
+    admin: dict = Depends(auth.get_current_admin_user),
 ):
     if modul and modul not in database.MODUL_VALID:
         raise HTTPException(
@@ -700,8 +750,9 @@ def daftar_riwayat(
                 f"Pilihan: {', '.join(database.MODUL_VALID)}"
             ),
         )
-    items = database.daftar_riwayat(modul=modul, limit=limit)
-    return {"total": len(items), "items": items}
+    items = database.daftar_riwayat(modul=modul, limit=limit, username=None)
+    total = database.hitung_riwayat(modul=modul, username=None)
+    return {"total": total, "items": items}
 
 
 @app.get(
@@ -714,7 +765,7 @@ def detail_riwayat(
     riwayat_id: int,
     _admin: dict = Depends(auth.get_current_admin_user),
 ):
-    item = database.ambil_riwayat(riwayat_id)
+    item = database.ambil_riwayat_milik(riwayat_id)
     if item is None:
         raise HTTPException(status_code=404, detail="Riwayat tidak ditemukan")
     return item

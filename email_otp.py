@@ -139,23 +139,19 @@ def kirim_otp_email(
     dipakai sapaan netral agar email tidak menampilkan "Hai ,".
 
     Return True bila Brevo menerima (HTTP 2xx). Bila ``BREVO_API_KEY`` belum
-    diisi, kode dicetak ke log dan False dikembalikan (bukan exception) agar
+    diisi, email tidak dikirim dan False dikembalikan (bukan exception) agar
     registrasi tetap bisa diuji di lokal.
 
     Bila pengiriman gagal, respons/kesalahan asli dicetak ke terminal
     (terlihat di Render -> Logs) lalu exception dilempar ulang.
     """
-    # DEBUG: tampilkan 10 karakter pertama kunci di log Render.
-    # Kunci Brevo selalu diawali "xkeysib-". Bila output kosong, env belum
-    # terpasang; bila berbeda, nilainya salah salin. Hanya prefix yang
-    # dicetak agar kunci tidak bocor utuh ke log.
-    print("DEBUG API KEY:", (os.getenv("BREVO_API_KEY") or "")[:10])
-
     api_key = _api_key()
     if not api_key:
+        # Kode OTP TIDAK dicetak: log Render bisa dibaca pihak lain dan siapa
+        # pun yang melihatnya bisa memakai kode untuk membajak akun.
         print(
-            f"[OTP-DEV] BREVO_API_KEY belum diisi. Kode untuk {email_tujuan}: "
-            f"{kode_otp} (berlaku {menit} menit). Email TIDAK dikirim."
+            f"[OTP-DEV] BREVO_API_KEY belum diisi. Email verifikasi untuk "
+            f"{email_tujuan} TIDAK dikirim. Set env BREVO_API_KEY."
         )
         return False
 
@@ -224,10 +220,39 @@ def kirim_otp_email(
     return True
 
 
+_PASSWORD_UMUM = {
+    "password",
+    "password1",
+    "password123",
+    "12345678",
+    "123456789",
+    "1234567890",
+    "qwerty123",
+    "admin123",
+    "iloveyou",
+}
+
+
 def validasi_password_kuat(password: str) -> Optional[str]:
-    """Return pesan galat bila password terlalu lemah, else None."""
-    if len(password) < 6:
-        return "Password minimal 6 karakter"
+    """
+    Return pesan galat bila password terlalu lemah, else None.
+
+    Aturan disamakan dengan ``Field(min_length=8)`` di ``schemas.py`` agar
+    pesan dari skema Pydantic dan dari sini tidak saling bertentangan.
+    """
+    if not isinstance(password, str):
+        return "Password tidak valid"
+    if len(password) < 8:
+        return "Password minimal 8 karakter"
     if len(password) > 72:
+        # bcrypt hanya memakai 72 byte pertama; lebih dari itu terpotong diam-diam.
         return "Password maksimal 72 karakter"
+    if password != password.strip():
+        return "Password tidak boleh diawali/diakhiri spasi"
+    if password.isdigit():
+        return "Password tidak boleh hanya berisi angka"
+    if len(set(password)) < 4:
+        return "Password terlalu mudah ditebak (variasi karakter kurang)"
+    if password.lower() in _PASSWORD_UMUM:
+        return "Password terlalu mudah ditebak"
     return None

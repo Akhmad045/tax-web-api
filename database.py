@@ -69,9 +69,20 @@ def init_db() -> None:
                 ringkasan     TEXT    NOT NULL DEFAULT '',
                 total_pph     REAL    NOT NULL DEFAULT 0,
                 detail        TEXT    NOT NULL DEFAULT '{}',
-                dibuat_pada   TEXT    NOT NULL
+                dibuat_pada   TEXT    NOT NULL,
+                username      TEXT    NOT NULL DEFAULT ''
             )
             """
+        )
+        # Migrasi: database lama belum punya kolom pemilik data.
+        kolom_riwayat = {r["name"] for r in conn.execute("PRAGMA table_info(riwayat)")}
+        if "username" not in kolom_riwayat:
+            conn.execute(
+                "ALTER TABLE riwayat ADD COLUMN username TEXT NOT NULL DEFAULT ''"
+            )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_riwayat_username "
+            "ON riwayat(username, id DESC)"
         )
         # index bantu untuk pengurutan riwayat terbaru
         conn.execute(
@@ -106,10 +117,17 @@ def init_db() -> None:
                 email      TEXT    NOT NULL,
                 code       TEXT    NOT NULL,
                 expires_at TEXT    NOT NULL,
-                dibuat_pada TEXT   NOT NULL
+                dibuat_pada TEXT   NOT NULL,
+                percobaan  INTEGER NOT NULL DEFAULT 0
             )
             """
         )
+        # Migrasi: tabel lama belum punya penghitung percobaan.
+        kolom_otp = {r["name"] for r in conn.execute("PRAGMA table_info(otp_codes)")}
+        if "percobaan" not in kolom_otp:
+            conn.execute(
+                "ALTER TABLE otp_codes ADD COLUMN percobaan INTEGER NOT NULL DEFAULT 0"
+            )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_otp_email ON otp_codes(email)"
         )
@@ -167,6 +185,7 @@ def simpan_riwayat(
     ringkasan: str = "",
     total_pph: float = 0,
     detail: Optional[Dict[str, Any]] = None,
+    username: str = "",
 ) -> Dict[str, Any]:
     """Simpan satu perhitungan ke tabel riwayat, kembalikan baris tersimpan."""
     if modul not in MODUL_VALID:
@@ -182,8 +201,8 @@ def simpan_riwayat(
             """
             INSERT INTO riwayat
                 (modul, judul, nama_wajib, identitas, tahun_pajak,
-                 status_ptkp, ringkasan, total_pph, detail, dibuat_pada)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 status_ptkp, ringkasan, total_pph, detail, dibuat_pada, username)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 modul,
@@ -196,6 +215,7 @@ def simpan_riwayat(
                 float(total_pph or 0),
                 detail_json,
                 dibuat_pada,
+                username or "",
             ),
         )
         conn.commit()
@@ -220,6 +240,9 @@ def _row_ke_dict(row: sqlite3.Row, sertakan_detail: bool = True) -> Dict[str, An
         "ringkasan": row["ringkasan"],
         "total_pph": row["total_pph"],
         "dibuat_pada": row["dibuat_pada"],
+        # Pemilik data. Aman dipakai untuk baris hasil SELECT * maupun SELECT
+        # eksplisit karena keduanya kini menyertakan kolom ini.
+        "username": row["username"] if "username" in row.keys() else "",
     }
     if sertakan_detail:
         try:
@@ -239,23 +262,33 @@ def ambil_riwayat(riwayat_id: int) -> Optional[Dict[str, Any]]:
 
 
 def daftar_riwayat(
-    modul: Optional[str] = None, limit: int = 50
+    modul: Optional[str] = None,
+    limit: int = 50,
+    username: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Ambil daftar riwayat terbaru (tanpa kolom ``detail`` agar ringan).
 
-    ``modul`` bila diisi akan memfilter berdasarkan jenis modul.
+    ``modul``    : filter jenis modul.
+    ``username`` : bila diisi, HANYA baris milik user tersebut. Admin memanggil
+                   tanpa parameter ini sehingga melihat semua data.
     """
     limit = max(1, min(int(limit), MAX_LIMIT))
 
     sql = (
         "SELECT id, modul, judul, nama_wajib, identitas, tahun_pajak, "
-        "status_ptkp, ringkasan, total_pph, dibuat_pada FROM riwayat"
+        "status_ptkp, ringkasan, total_pph, dibuat_pada, username FROM riwayat"
     )
+    kondisi: List[str] = []
     params: List[Any] = []
     if modul:
-        sql += " WHERE modul = ?"
+        kondisi.append("modul = ?")
         params.append(modul)
+    if username:
+        kondisi.append("username = ?")
+        params.append(username)
+    if kondisi:
+        sql += " WHERE " + " AND ".join(kondisi)
     sql += " ORDER BY id DESC LIMIT ?"
     params.append(limit)
 
@@ -264,10 +297,59 @@ def daftar_riwayat(
     return [_row_ke_dict(r, sertakan_detail=False) for r in rows]
 
 
-def hapus_riwayat(riwayat_id: int) -> bool:
-    """Hapus satu baris riwayat. Return True bila ada baris terhapus."""
+def hitung_riwayat(modul: Optional[str] = None, username: Optional[str] = None) -> int:
+    """
+    Hitung JUMLAH TOTAL baris riwayat (bukan panjang halaman).
+
+    Dipakai agar ``total`` pada respons tidak selalu mentok di ``limit``.
+    """
+    sql = "SELECT COUNT(*) AS n FROM riwayat"
+    kondisi: List[str] = []
+    params: List[Any] = []
+    if modul:
+        kondisi.append("modul = ?")
+        params.append(modul)
+    if username:
+        kondisi.append("username = ?")
+        params.append(username)
+    if kondisi:
+        sql += " WHERE " + " AND ".join(kondisi)
+
     with get_connection() as conn:
-        cur = conn.execute("DELETE FROM riwayat WHERE id = ?", (riwayat_id,))
+        row = conn.execute(sql, params).fetchone()
+    return int(row["n"]) if row else 0
+
+
+def ambil_riwayat_milik(riwayat_id: int, username: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """
+    Ambil satu baris riwayat dengan pembatasan pemilik.
+
+    ``username=None`` berarti admin (tanpa filter). Bila diisi, baris milik
+    user lain dianggap tidak ada sehingga tidak bisa dibaca/dihapus.
+    """
+    sql = "SELECT * FROM riwayat WHERE id = ?"
+    params: List[Any] = [riwayat_id]
+    if username:
+        sql += " AND username = ?"
+        params.append(username)
+    with get_connection() as conn:
+        row = conn.execute(sql, params).fetchone()
+    return _row_ke_dict(row) if row else None
+
+
+def hapus_riwayat(riwayat_id: int, username: Optional[str] = None) -> bool:
+    """
+    Hapus satu baris riwayat. Return True bila ada baris terhapus.
+
+    ``username`` membatasi penghapusan pada baris milik user tersebut.
+    """
+    sql = "DELETE FROM riwayat WHERE id = ?"
+    params: List[Any] = [riwayat_id]
+    if username:
+        sql += " AND username = ?"
+        params.append(username)
+    with get_connection() as conn:
+        cur = conn.execute(sql, params)
         conn.commit()
         return cur.rowcount > 0
 
@@ -469,7 +551,41 @@ def ambil_otp(email: str) -> Optional[Dict[str, Any]]:
         "code": row["code"],
         "expires_at": row["expires_at"],
         "dibuat_pada": row["dibuat_pada"],
+        "percobaan": row["percobaan"] if "percobaan" in row.keys() else 0,
     }
+
+
+# Batas percobaan salah sebelum kode dihapus. Kode hanya 6 digit (1 juta
+# kemungkinan); tanpa batas, penyerang bisa menebak sampai berhasil.
+OTP_MAKS_PERCOBAAN = int(os.environ.get("OTP_MAKS_PERCOBAAN", "5"))
+
+
+def tambah_percobaan_otp(email: str) -> int:
+    """
+    Naikkan penghitung percobaan salah untuk OTP email ini.
+
+    Return jumlah percobaan setelah ditambah. Bila melewati
+    ``OTP_MAKS_PERCOBAAN``, kode langsung dihapus sehingga kode benar pun
+    tidak bisa dipakai lagi (user harus minta kirim ulang).
+    """
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE otp_codes SET percobaan = percobaan + 1 "
+            "WHERE lower(email) = lower(?)",
+            (email,),
+        )
+        row = conn.execute(
+            "SELECT percobaan FROM otp_codes WHERE lower(email) = lower(?) "
+            "ORDER BY id DESC LIMIT 1",
+            (email,),
+        ).fetchone()
+        jumlah = int(row["percobaan"]) if row else OTP_MAKS_PERCOBAAN
+        if jumlah >= OTP_MAKS_PERCOBAAN:
+            conn.execute(
+                "DELETE FROM otp_codes WHERE lower(email) = lower(?)", (email,)
+            )
+        conn.commit()
+    return jumlah
 
 
 def otp_kedaluwarsa(expires_at: str) -> bool:
