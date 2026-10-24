@@ -272,6 +272,12 @@ class ForgotPasswordRequest(BaseModel):
     email: EmailStr = Field(..., description="Email akun yang lupa password")
 
 
+class ResendOtpRequest(BaseModel):
+    email: EmailStr = Field(
+        ..., description="Email pendaftaran yang ingin dikirimi ulang kode OTP"
+    )
+
+
 class ResetPasswordRequest(BaseModel):
     email: EmailStr = Field(..., description="Email akun")
     otp_code: str = Field(..., min_length=6, max_length=6, pattern=r"^\d{6}$")

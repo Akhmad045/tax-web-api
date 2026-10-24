@@ -25,7 +25,7 @@ import secrets
 import traceback
 from typing import Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
 
@@ -38,6 +38,7 @@ from schemas import (
     HealthResponse,
     PesanResponse,
     RegisterRequest,
+    ResendOtpRequest,
     ResetPasswordRequest,
     VerifyOtpRequest,
     PPh21BulananRequest,
@@ -235,18 +236,61 @@ def pph_badan(payload: PPhBadanRequest):
 # REGISTRASI & VERIFIKASI OTP
 # ---------------------------------------------------------------------------
 
+async def _kirim_otp_latar(
+    email: str,
+    kode: str,
+    username: str,
+    menit: int,
+    konteks: str = "registrasi",
+) -> None:
+    """
+    Pembungkus pengiriman OTP untuk ``BackgroundTasks``.
+
+    Latar belakang punya konsekuensi: exception di sini TIDAK bisa lagi
+    diterjemahkan menjadi HTTP 503, karena response sudah terkirim ke klien.
+    Semua error karena itu ditangkap, dicetak lengkap ke log (agar terlihat
+    di Render -> Logs), dan tidak dibiarkan menjadi exception tak tertangani
+    yang bisa membuat request crash.
+    """
+    try:
+        terkirim = await email_otp.kirim_otp_email(
+            email=email,
+            kode=kode,
+            username=username,
+            menit=menit,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[ERROR] Gagal mengirim OTP {konteks} ke {email}: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        traceback.print_exc()
+        return
+
+    if not terkirim:
+        print(
+            f"[WARN] OTP {konteks} untuk {email} tidak dikirim lewat email "
+            "(SMTP belum dikonfigurasi). Kode tersedia di log [OTP-DEV]."
+        )
+
+
 @app.post(
     "/api/register",
     response_model=PesanResponse,
     tags=["Auth"],
     summary="Daftar akun baru, kirim kode OTP ke email",
 )
-async def register(payload: RegisterRequest):
+async def register(payload: RegisterRequest, background_tasks: BackgroundTasks):
     """
     Tahap 1 registrasi.
 
     User BELUM dibuat di tabel users pada langkah ini — data ditahan dulu
     sampai OTP diverifikasi. Kode OTP dikirim ke email tujuan.
+
+    Pengiriman email dijalankan sebagai BACKGROUND TASK: endpoint langsung
+    membalas setelah OTP tersimpan, tanpa menunggu SMTP selesai. Ini
+    menghilangkan request yang menggantung (hang) ketika koneksi SMTP lambat
+    atau server Render baru bangun dari cold start.
 
     Catatan: menahan pembuatan user sampai verifikasi mencegah username
     "dibajak" oleh orang yang mendaftar dengan email palsu.
@@ -276,35 +320,23 @@ async def register(payload: RegisterRequest):
     )
     database.simpan_otp(email, kode, ttl_minutes=database.OTP_TTL_MINUTES)
 
-    try:
-        terkirim = await email_otp.kirim_otp_email(
-            email=email,
-            kode=kode,
-            username=username,
-            menit=database.OTP_TTL_MINUTES,
-        )
-    except Exception as exc:  # noqa: BLE001
-        # SMTP gagal (kredensial salah, jaringan, dsb). Hapus OTP agar
-        # tidak ada kode "yatim" yang tidak pernah sampai ke pengguna.
-        database.hapus_otp(email)
-        # Cetak error asli + traceback ke log server (Render: tab Logs) supaya
-        # penyebabnya bisa dilihat, bukan hanya pesan 503 ke pengguna.
-        print(f"[ERROR] Gagal mengirim OTP registrasi ke {email}: {type(exc).__name__}: {exc}")
-        traceback.print_exc()
-        raise HTTPException(
-            status_code=503,
-            detail="Gagal mengirim email verifikasi. Coba lagi beberapa saat.",
-        ) from exc
+    # Kirim di latar belakang: response TIDAK menunggu SMTP.
+    # Kegagalan pengiriman ditangani di dalam fungsi pembungkus agar tidak
+    # menjadi exception yang tidak tertangani setelah response dikirim.
+    background_tasks.add_task(
+        _kirim_otp_latar,
+        email=email,
+        kode=kode,
+        username=username,
+        menit=database.OTP_TTL_MINUTES,
+        konteks="registrasi",
+    )
 
-    if terkirim:
-        detail = "Kode verifikasi telah dikirim ke email Anda."
-    else:
-        detail = (
-            "SMTP belum dikonfigurasi di server. Kode OTP dicetak di log "
-            "server untuk keperluan pengujian."
-        )
-
-    return {"message": "Registrasi berhasil, silakan verifikasi email", "detail": detail}
+    return {
+        "message": "Registrasi berhasil, silakan verifikasi email",
+        "detail": "Kode verifikasi sedang dikirim ke email Anda. "
+        "Periksa kotak masuk dan folder spam.",
+    }
 
 
 @app.post(
@@ -374,6 +406,62 @@ def verify_otp(payload: VerifyOtpRequest):
     }
 
 
+@app.post(
+    "/api/resend-otp",
+    response_model=PesanResponse,
+    tags=["Auth"],
+    summary="Kirim ulang kode OTP verifikasi email",
+)
+async def resend_otp(payload: ResendOtpRequest, background_tasks: BackgroundTasks):
+    """
+    Kirim ulang kode OTP untuk pendaftaran yang belum diverifikasi.
+
+    Alur: hapus OTP lama -> buat kode baru -> simpan ke DB -> kirim sebagai
+    background task. Response langsung 200 tanpa menunggu SMTP, sama seperti
+    /api/register, sehingga tombol "Kirim Ulang Kode" tidak menggantung.
+
+    Cooldown 60 detik dijaga di sisi frontend. Di backend hanya divalidasi
+    bahwa pendaftaran yang dimaksud memang masih ada; email yang tidak punya
+    data pending diperlakukan sebagai galat 404 yang jelas agar user tahu
+    harus mendaftar ulang.
+    """
+    email = str(payload.email).strip()
+
+    database.bersihkan_otp_kedaluwarsa()
+
+    # Tanpa data pendaftaran, verifikasi tidak mungkin diselesaikan walau
+    # OTP-nya terkirim. Lebih baik minta user mendaftar ulang.
+    pending = database.ambil_pending_registrasi(email)
+    if pending is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Data pendaftaran tidak ditemukan atau sudah kedaluwarsa. "
+            "Silakan daftar ulang.",
+        )
+
+    username = pending["username"]
+
+    # Hapus OTP lama, lalu buat yang baru. `simpan_otp` juga menghapus kode
+    # sebelumnya untuk email ini, jadi tidak ada dua kode aktif sekaligus.
+    database.hapus_otp(email)
+    kode = email_otp.buat_kode_otp()
+    database.simpan_otp(email, kode, ttl_minutes=database.OTP_TTL_MINUTES)
+
+    background_tasks.add_task(
+        _kirim_otp_latar,
+        email=email,
+        kode=kode,
+        username=username,
+        menit=database.OTP_TTL_MINUTES,
+        konteks="kirim ulang",
+    )
+
+    return {
+        "message": "Kode OTP baru sedang dikirim",
+        "detail": f"Periksa email {email} (termasuk folder spam).",
+    }
+
+
 # ---------------------------------------------------------------------------
 # LUPA / RESET PASSWORD
 # ---------------------------------------------------------------------------
@@ -384,7 +472,7 @@ def verify_otp(payload: VerifyOtpRequest):
     tags=["Auth"],
     summary="Kirim kode OTP untuk reset password",
 )
-async def forgot_password(payload: ForgotPasswordRequest):
+async def forgot_password(payload: ForgotPasswordRequest, background_tasks: BackgroundTasks):
     """
     Mengirim kode OTP ke email pemilik akun untuk keperluan reset password.
 
@@ -406,39 +494,23 @@ async def forgot_password(payload: ForgotPasswordRequest):
     user = database.ambil_user_by_email(email)
 
     kode = email_otp.buat_kode_otp()
+
+    # OTP diterbitkan lebih dulu, pengiriman email dijalankan di latar
+    # belakang agar endpoint ini tidak menggantung saat SMTP lambat.
     database.simpan_otp(email, kode, ttl_minutes=database.OTP_TTL_MINUTES)
 
-    try:
-        terkirim = await email_otp.kirim_otp_email(
-            email=email,
-            kode=kode,
-            username=user["username"],
-            menit=database.OTP_TTL_MINUTES,
-        )
-    except Exception as exc:  # noqa: BLE001
-        database.hapus_otp(email)
-        # Sama seperti alur registrasi: tampilkan error aslinya di log.
-        print(
-            "[ERROR] Gagal mengirim OTP reset password ke "
-            f"{email}: {type(exc).__name__}: {exc}"
-        )
-        traceback.print_exc()
-        raise HTTPException(
-            status_code=503,
-            detail="Gagal mengirim email reset password. Coba lagi beberapa saat.",
-        ) from exc
-
-    if terkirim:
-        detail = "Kode reset password telah dikirim ke email Anda."
-    else:
-        detail = (
-            "SMTP belum dikonfigurasi di server. Kode OTP dicetak di log "
-            "server untuk keperluan pengujian."
-        )
+    background_tasks.add_task(
+        _kirim_otp_latar,
+        email=email,
+        kode=kode,
+        username=user["username"],
+        menit=database.OTP_TTL_MINUTES,
+        konteks="reset password",
+    )
 
     return {
         "message": "Jika email terdaftar, kode reset password telah dikirim",
-        "detail": detail,
+        "detail": "Kode reset password sedang dikirim ke email Anda.",
     }
 
 
