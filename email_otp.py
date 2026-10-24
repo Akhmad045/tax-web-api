@@ -38,9 +38,15 @@ from dotenv import load_dotenv
 # Muat .env bila ada (tidak menimpa env yang sudah diset sistem).
 load_dotenv()
 
-MAIL_USERNAME = os.environ.get("MAIL_USERNAME", "")
-MAIL_PASSWORD = os.environ.get("MAIL_PASSWORD", "")
+MAIL_USERNAME = os.environ.get("MAIL_USERNAME", "").strip()
+MAIL_PASSWORD = os.environ.get("MAIL_PASSWORD", "").strip()
 MAIL_SERVER = os.environ.get("MAIL_SERVER", "smtp.gmail.com").strip() or "smtp.gmail.com"
+
+# Server kadang diisi "smtp.gmail.com:465" atau berisi skema URL. Ambil host
+# saja agar koneksi tidak menembak hostname yang tidak valid.
+if "://" in MAIL_SERVER:
+    MAIL_SERVER = MAIL_SERVER.split("://", 1)[1]
+MAIL_SERVER = MAIL_SERVER.split("/")[0].split(":")[0] or "smtp.gmail.com"
 
 # --- Port: SELALU STARTTLS di 587 -------------------------------------------
 # Bila env MAIL_PORT diisi 465 (atau MAIL_SSL_TLS=True), paksa kembali ke 587
@@ -102,6 +108,43 @@ MAIL_FROM = f"{_MAIL_FROM_NAME} <{_MAIL_FROM_ADDRESS}>" if _MAIL_FROM_ADDRESS el
 def email_terkonfigurasi() -> bool:
     """True bila kredensial SMTP sudah cukup untuk mengirim email."""
     return bool(MAIL_USERNAME and MAIL_PASSWORD and _MAIL_FROM_ADDRESS)
+
+
+def _peringatan_konfigurasi() -> None:
+    """
+    Cetak potensi salah konfigurasi sekali saat modul dimuat.
+
+    Kesalahan yang paling sering terjadi pada deploy Render, dan sengaja
+    ditampilkan lebih awal (bukan menunggu SMTP gagal) agar langsung terlihat
+    di Logs setelah restart:
+      * App Password Gmail bukan 16 karakter (masih pakai password akun).
+      * MAIL_FROM berbeda domain/akun dari MAIL_USERNAME (Gmail menolak
+        pengirim yang bukan milik akun yang login -> "Sender address
+        rejected").
+    """
+    if not email_terkonfigurasi():
+        return
+
+    if MAIL_SERVER.endswith("gmail.com"):
+        bersih = MAIL_PASSWORD.replace(" ", "")
+        if len(bersih) != 16:
+            print(
+                f"[EMAIL-WARN] MAIL_PASSWORD panjangnya {len(bersih)} karakter; "
+                "App Password Gmail seharusnya 16 karakter. Password akun biasa "
+                "TIDAK bisa dipakai untuk SMTP."
+            )
+        if "@" in MAIL_USERNAME:
+            domain_login = MAIL_USERNAME.rsplit("@", 1)[1].lower()
+            domain_from = _MAIL_FROM_ADDRESS.rsplit("@", 1)[-1].lower()
+            if domain_login != domain_from:
+                print(
+                    f"[EMAIL-WARN] MAIL_FROM ({MAIL_FROM}) memakai domain berbeda "
+                    f"dari MAIL_USERNAME ({MAIL_USERNAME}). Gmail akan menolak "
+                    "pengirim tersebut."
+                )
+
+
+_peringatan_konfigurasi()
 
 
 
