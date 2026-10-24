@@ -40,7 +40,7 @@ load_dotenv()
 
 MAIL_USERNAME = os.environ.get("MAIL_USERNAME", "")
 MAIL_PASSWORD = os.environ.get("MAIL_PASSWORD", "")
-MAIL_SERVER = os.environ.get("MAIL_SERVER", "smtp.gmail.com")
+MAIL_SERVER = os.environ.get("MAIL_SERVER", "smtp.gmail.com").strip() or "smtp.gmail.com"
 
 # --- Port: SELALU STARTTLS di 587 -------------------------------------------
 # Bila env MAIL_PORT diisi 465 (atau MAIL_SSL_TLS=True), paksa kembali ke 587
@@ -171,9 +171,22 @@ async def kirim_otp_email(email: str, kode: str, username: str, menit: int = 5) 
     dilempar ulang agar pemanggil bisa menampilkan pesan yang tepat.
     """
     if not email_terkonfigurasi():
+        # Bukan silent failure: penyebabnya dicetak eksplisit ke log, termasuk
+        # variabel mana yang kosong, supaya salah konfigurasi di Render
+        # langsung kelihatan di tab Logs.
+        kosong = [
+            nama
+            for nama, nilai in (
+                ("MAIL_USERNAME", MAIL_USERNAME),
+                ("MAIL_PASSWORD", MAIL_PASSWORD),
+                ("MAIL_FROM", _MAIL_FROM_ADDRESS),
+            )
+            if not nilai
+        ]
         print(
-            f"[OTP-DEV] SMTP belum dikonfigurasi. Kode untuk {email}: {kode} "
-            f"(berlaku {menit} menit)"
+            f"[OTP-DEV] SMTP belum dikonfigurasi (env kosong: {', '.join(kosong)}). "
+            f"Kode untuk {email}: {kode} (berlaku {menit} menit). "
+            "Email TIDAK dikirim."
         )
         return False
 
