@@ -21,6 +21,7 @@ Menjalankan:
 from __future__ import annotations
 
 import os
+import secrets
 from typing import Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query
@@ -29,9 +30,13 @@ from fastapi.security import OAuth2PasswordRequestForm
 
 import auth
 import database
+import email_otp
 import services
 from schemas import (
     HealthResponse,
+    PesanResponse,
+    RegisterRequest,
+    VerifyOtpRequest,
     PPh21BulananRequest,
     PPh21BulananResponse,
     PPh21TahunanRequest,
@@ -221,6 +226,146 @@ def pph_badan(payload: PPhBadanRequest):
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
+# REGISTRASI & VERIFIKASI OTP
+# ---------------------------------------------------------------------------
+
+@app.post(
+    "/api/register",
+    response_model=PesanResponse,
+    tags=["Auth"],
+    summary="Daftar akun baru, kirim kode OTP ke email",
+)
+async def register(payload: RegisterRequest):
+    """
+    Tahap 1 registrasi.
+
+    User BELUM dibuat di tabel users pada langkah ini — data ditahan dulu
+    sampai OTP diverifikasi. Kode OTP dikirim ke email tujuan.
+
+    Catatan: menahan pembuatan user sampai verifikasi mencegah username
+    "dibajak" oleh orang yang mendaftar dengan email palsu.
+    """
+    username = payload.username.strip()
+    email = str(payload.email).strip()
+
+    galat_pw = email_otp.validasi_password_kuat(payload.password)
+    if galat_pw:
+        raise HTTPException(status_code=422, detail=galat_pw)
+
+    if database.ambil_user_by_username(username) is not None:
+        raise HTTPException(status_code=409, detail="Username sudah terdaftar")
+    if database.ambil_user_by_email(email) is not None:
+        raise HTTPException(status_code=409, detail="Email sudah terdaftar")
+
+    # Buang OTP kedaluwarsa agar tabel tidak menumpuk.
+    database.bersihkan_otp_kedaluwarsa()
+
+    kode = email_otp.buat_kode_otp()
+    # Simpan dulu data pendaftaran (password sudah di-hash) supaya tahap
+    # verifikasi punya bahan untuk membuat user.
+    database.simpan_pending_registrasi(
+        username=username,
+        email=email,
+        hashed_password=auth.hash_password(payload.password),
+    )
+    database.simpan_otp(email, kode, ttl_minutes=database.OTP_TTL_MINUTES)
+
+    try:
+        terkirim = await email_otp.kirim_otp_email(
+            email=email,
+            kode=kode,
+            username=username,
+            menit=database.OTP_TTL_MINUTES,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # SMTP gagal (kredensial salah, jaringan, dsb). Hapus OTP agar
+        # tidak ada kode "yatim" yang tidak pernah sampai ke pengguna.
+        database.hapus_otp(email)
+        print(f"[ERROR] Gagal mengirim OTP ke {email}: {exc}")
+        raise HTTPException(
+            status_code=503,
+            detail="Gagal mengirim email verifikasi. Coba lagi beberapa saat.",
+        ) from exc
+
+    if terkirim:
+        detail = "Kode verifikasi telah dikirim ke email Anda."
+    else:
+        detail = (
+            "SMTP belum dikonfigurasi di server. Kode OTP dicetak di log "
+            "server untuk keperluan pengujian."
+        )
+
+    return {"message": "Registrasi berhasil, silakan verifikasi email", "detail": detail}
+
+
+@app.post(
+    "/api/verify-otp",
+    response_model=PesanResponse,
+    tags=["Auth"],
+    summary="Verifikasi kode OTP dan aktifkan akun",
+)
+def verify_otp(payload: VerifyOtpRequest):
+    """
+    Tahap 2 registrasi.
+
+    Memeriksa kode OTP lalu membuat user dengan ``is_verified=True``.
+    Kode yang salah/kedaluwarsa tidak menghapus data pendaftaran, hanya
+    menolak permintaan sehingga user bisa mencoba lagi (atau daftar ulang
+    untuk mendapat kode baru).
+    """
+    email = str(payload.email).strip()
+    kode = payload.otp_code.strip()
+
+    if database.ambil_user_by_email(email) is not None:
+        raise HTTPException(status_code=409, detail="Email sudah terverifikasi")
+
+    otp = database.ambil_otp(email)
+    if otp is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Kode OTP tidak ditemukan. Silakan registrasi ulang.",
+        )
+    if database.otp_kedaluwarsa(otp["expires_at"]):
+        database.hapus_otp(email)
+        raise HTTPException(
+            status_code=410,
+            detail="Kode OTP sudah kedaluwarsa. Silakan registrasi ulang.",
+        )
+    # Perbandingan constant-time agar tidak bisa ditebak lewat timing.
+    if not secrets.compare_digest(str(otp["code"]), str(kode)):
+        raise HTTPException(status_code=400, detail="Kode OTP salah")
+
+    # OTP benar, tapi user belum tersimpan. Karena /api/register menahan
+    # pembuatan user, data pendaftaran perlu diambil dari tempat lain.
+    pending = database.ambil_pending_registrasi(email)
+    if pending is None:
+        raise HTTPException(
+            status_code=410,
+            detail="Data pendaftaran tidak ditemukan atau sudah kedaluwarsa. "
+            "Silakan registrasi ulang.",
+        )
+
+    try:
+        user = database.buat_user(
+            username=pending["username"],
+            hashed_password=pending["hashed_password"],
+            role="user",
+            email=email,
+            is_verified=True,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    database.hapus_otp(email)
+    database.hapus_pending_registrasi(email)
+
+    return {
+        "message": "Verifikasi berhasil, akun sudah aktif",
+        "detail": f"Silakan login dengan username {user['username']}.",
+    }
 
 
 # ---------------------------------------------------------------------------

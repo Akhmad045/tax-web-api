@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field
 
 # ---------------------------------------------------------------------------
 # Enum status PTKP (dipakai sebagai validasi Literal sederhana)
@@ -242,3 +242,23 @@ class UserBuatRequest(BaseModel):
 class UserDaftarResponse(BaseModel):
     total: int
     items: List[UserInfo]
+
+
+# ---------------------------------------------------------------------------
+# REGISTRASI & VERIFIKASI OTP
+# ---------------------------------------------------------------------------
+
+class RegisterRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=50)
+    email: EmailStr = Field(..., description="Email tujuan pengiriman OTP")
+    password: str = Field(..., min_length=6, max_length=72)
+
+
+class VerifyOtpRequest(BaseModel):
+    email: EmailStr = Field(..., description="Email yang didaftarkan")
+    otp_code: str = Field(..., min_length=6, max_length=6, pattern=r"^\d{6}$")
+
+
+class PesanResponse(BaseModel):
+    message: str
+    detail: str = ""

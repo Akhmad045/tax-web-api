@@ -13,8 +13,11 @@ tax.db
 *.sqlite
 *.sqlite3
 
-# Environment variables
+# Environment variables (jangan commit kredensial).
+# .env.example tetap di-commit sebagai template.
 .env
+.env.*
+!.env.example
 
 # Editor / OS
 .vscode/*

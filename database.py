@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -86,6 +86,8 @@ def init_db() -> None:
                 hashed_password TEXT    NOT NULL,
                 role            TEXT    NOT NULL DEFAULT 'user',
                 is_active       INTEGER NOT NULL DEFAULT 1,
+                email           TEXT    NOT NULL DEFAULT '',
+                is_verified     INTEGER NOT NULL DEFAULT 0,
                 dibuat_pada     TEXT    NOT NULL
             )
             """
@@ -93,7 +95,62 @@ def init_db() -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)"
         )
+
+        _migrasi_users(conn)
+
+        # kode OTP untuk verifikasi email saat registrasi
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS otp_codes (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                email      TEXT    NOT NULL,
+                code       TEXT    NOT NULL,
+                expires_at TEXT    NOT NULL,
+                dibuat_pada TEXT   NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_otp_email ON otp_codes(email)"
+        )
+
+        # Data pendaftaran yang menunggu verifikasi OTP. User baru masuk ke
+        # tabel users setelah kode terbukti benar.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pending_registrasi (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                username        TEXT    NOT NULL,
+                email           TEXT    NOT NULL,
+                hashed_password TEXT    NOT NULL,
+                dibuat_pada     TEXT    NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_email "
+            "ON pending_registrasi(lower(email))"
+        )
         conn.commit()
+
+
+def _migrasi_users(conn: sqlite3.Connection) -> None:
+    """
+    Tambahkan kolom baru ke tabel users pada database lama.
+
+    ``CREATE TABLE IF NOT EXISTS`` tidak menambah kolom ke tabel yang sudah
+    ada, jadi database dari sebelum fitur registrasi perlu dimigrasi manual.
+    ALTER TABLE ADD COLUMN aman dipanggil berkali-kali asalkan dicek dulu.
+    """
+    kolom_ada = {r["name"] for r in conn.execute("PRAGMA table_info(users)")}
+    if "email" not in kolom_ada:
+        conn.execute("ALTER TABLE users ADD COLUMN email TEXT NOT NULL DEFAULT ''")
+    if "is_verified" not in kolom_ada:
+        conn.execute(
+            "ALTER TABLE users ADD COLUMN is_verified INTEGER NOT NULL DEFAULT 0"
+        )
+    # Akun lama (hasil seeding admin) dianggap terverifikasi.
+    conn.execute("UPDATE users SET is_verified = 1 WHERE is_verified = 0 AND role = 'admin'")
 
 
 # ---------------------------------------------------------------------------
@@ -227,8 +284,10 @@ def _user_ke_dict(row: sqlite3.Row, sertakan_hash: bool = False) -> Dict[str, An
     data: Dict[str, Any] = {
         "id": row["id"],
         "username": row["username"],
+        "email": row["email"] if "email" in row.keys() else "",
         "role": row["role"],
         "is_active": bool(row["is_active"]),
+        "is_verified": bool(row["is_verified"]) if "is_verified" in row.keys() else False,
         "dibuat_pada": row["dibuat_pada"],
     }
     if sertakan_hash:
@@ -247,12 +306,31 @@ def ambil_user_by_username(
     return _user_ke_dict(row, sertakan_hash=sertakan_hash) if row else None
 
 
+def ambil_user_by_email(
+    email: str, sertakan_hash: bool = False
+) -> Optional[Dict[str, Any]]:
+    """Ambil user berdasarkan email (dibandingkan case-insensitive)."""
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM users WHERE lower(email) = lower(?) LIMIT 1", (email,)
+        ).fetchone()
+    return _user_ke_dict(row, sertakan_hash=sertakan_hash) if row else None
+
+
 def buat_user(
-    username: str, hashed_password: str, role: str = "user"
+    username: str,
+    hashed_password: str,
+    role: str = "user",
+    email: str = "",
+    is_verified: bool = True,
 ) -> Dict[str, Any]:
     """
-    Buat user baru. Raise ValueError bila username sudah dipakai
+    Buat user baru. Raise ValueError bila username/email sudah dipakai
     atau role tidak valid.
+
+    ``is_verified`` default True agar pembuatan akun lewat panel admin
+    langsung bisa dipakai login. Alur registrasi publik mengirim False
+    sampai OTP diverifikasi.
     """
     if role not in ROLE_VALID:
         raise ValueError(
@@ -260,16 +338,27 @@ def buat_user(
         )
     if not username or not hashed_password:
         raise ValueError("Username dan password wajib diisi")
+    if email and ambil_user_by_email(email) is not None:
+        raise ValueError(f"Email {email!r} sudah terdaftar")
 
     dibuat_pada = datetime.now(timezone.utc).isoformat(timespec="seconds")
     try:
         with get_connection() as conn:
             cur = conn.execute(
                 """
-                INSERT INTO users (username, hashed_password, role, is_active, dibuat_pada)
-                VALUES (?, ?, ?, 1, ?)
+                INSERT INTO users
+                    (username, hashed_password, role, is_active,
+                     email, is_verified, dibuat_pada)
+                VALUES (?, ?, ?, 1, ?, ?, ?)
                 """,
-                (username, hashed_password, role, dibuat_pada),
+                (
+                    username,
+                    hashed_password,
+                    role,
+                    email or "",
+                    1 if is_verified else 0,
+                    dibuat_pada,
+                ),
             )
             conn.commit()
             user_id = cur.lastrowid
@@ -280,6 +369,24 @@ def buat_user(
     if user is None:  # pragma: no cover
         raise RuntimeError(f"Gagal membaca user yang baru dibuat (id={user_id})")
     return user
+
+
+def verifikasi_user(username: str) -> bool:
+    """Tandai user sudah terverifikasi (dipakai setelah OTP benar)."""
+    with get_connection() as conn:
+        cur = conn.execute(
+            "UPDATE users SET is_verified = 1 WHERE username = ?", (username,)
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def hapus_user(username: str) -> bool:
+    """Hapus user berdasarkan username. Return True bila ada yang terhapus."""
+    with get_connection() as conn:
+        cur = conn.execute("DELETE FROM users WHERE username = ?", (username,))
+        conn.commit()
+        return cur.rowcount > 0
 
 
 def jumlah_user() -> int:
@@ -293,8 +400,148 @@ def daftar_user() -> List[Dict[str, Any]]:
     """Daftar seluruh user (tanpa hash password)."""
     with get_connection() as conn:
         rows = conn.execute(
-            "SELECT id, username, role, is_active, dibuat_pada "
+            "SELECT id, username, email, role, is_active, is_verified, dibuat_pada "
             "FROM users ORDER BY id ASC"
         ).fetchall()
     return [_user_ke_dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# OTP (verifikasi email)
+# ---------------------------------------------------------------------------
+
+# Masa berlaku kode OTP dalam menit.
+OTP_TTL_MINUTES = int(os.environ.get("OTP_TTL_MINUTES", "5"))
+
+
+def simpan_otp(email: str, code: str, ttl_minutes: int = OTP_TTL_MINUTES) -> str:
+    """
+    Simpan kode OTP untuk sebuah email dan kembalikan waktu kedaluwarsanya.
+
+    Kode lama untuk email yang sama dihapus lebih dulu agar hanya kode
+    terbaru yang berlaku (mencegah kebingungan bila user minta kirim ulang).
+    """
+    sekarang = datetime.now(timezone.utc)
+    kedaluwarsa = sekarang + timedelta(minutes=ttl_minutes)
+
+    with get_connection() as conn:
+        conn.execute("DELETE FROM otp_codes WHERE lower(email) = lower(?)", (email,))
+        conn.execute(
+            """
+            INSERT INTO otp_codes (email, code, expires_at, dibuat_pada)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                email,
+                code,
+                kedaluwarsa.isoformat(timespec="seconds"),
+                sekarang.isoformat(timespec="seconds"),
+            ),
+        )
+        conn.commit()
+    return kedaluwarsa.isoformat(timespec="seconds")
+
+
+def ambil_otp(email: str) -> Optional[Dict[str, Any]]:
+    """Ambil OTP aktif untuk sebuah email (case-insensitive)."""
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM otp_codes WHERE lower(email) = lower(?) "
+            "ORDER BY id DESC LIMIT 1",
+            (email,),
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        "id": row["id"],
+        "email": row["email"],
+        "code": row["code"],
+        "expires_at": row["expires_at"],
+        "dibuat_pada": row["dibuat_pada"],
+    }
+
+
+def otp_kedaluwarsa(expires_at: str) -> bool:
+    """True bila waktu kedaluwarsa sudah lewat."""
+    try:
+        batas = datetime.fromisoformat(expires_at)
+    except (TypeError, ValueError):
+        return True
+    if batas.tzinfo is None:
+        batas = batas.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) > batas
+
+
+def hapus_otp(email: str) -> None:
+    """Hapus OTP milik sebuah email."""
+    with get_connection() as conn:
+        conn.execute("DELETE FROM otp_codes WHERE lower(email) = lower(?)", (email,))
+        conn.commit()
+
+
+def bersihkan_otp_kedaluwarsa() -> int:
+    """Hapus OTP yang sudah lewat masa berlaku. Return jumlah baris terhapus."""
+    batas = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with get_connection() as conn:
+        cur = conn.execute("DELETE FROM otp_codes WHERE expires_at < ?", (batas,))
+        conn.commit()
+        return cur.rowcount
+
+
+# ---------------------------------------------------------------------------
+# PENDING REGISTRASI
+# ---------------------------------------------------------------------------
+
+def simpan_pending_registrasi(
+    username: str, email: str, hashed_password: str
+) -> None:
+    """
+    Simpan data pendaftaran sementara (belum jadi user aktif).
+
+    Password sudah di-hash sebelum disimpan, jadi tidak pernah ada
+    password mentah di database.
+    """
+    sekarang = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with get_connection() as conn:
+        conn.execute(
+            "DELETE FROM pending_registrasi WHERE lower(email) = lower(?)",
+            (email,),
+        )
+        conn.execute(
+            """
+            INSERT INTO pending_registrasi
+                (username, email, hashed_password, dibuat_pada)
+            VALUES (?, ?, ?, ?)
+            """,
+            (username, email, hashed_password, sekarang),
+        )
+        conn.commit()
+
+
+def ambil_pending_registrasi(email: str) -> Optional[Dict[str, Any]]:
+    """Ambil data pendaftaran yang menunggu verifikasi."""
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM pending_registrasi WHERE lower(email) = lower(?) "
+            "ORDER BY id DESC LIMIT 1",
+            (email,),
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        "id": row["id"],
+        "username": row["username"],
+        "email": row["email"],
+        "hashed_password": row["hashed_password"],
+        "dibuat_pada": row["dibuat_pada"],
+    }
+
+
+def hapus_pending_registrasi(email: str) -> None:
+    """Hapus data pendaftaran setelah berhasil diverifikasi."""
+    with get_connection() as conn:
+        conn.execute(
+            "DELETE FROM pending_registrasi WHERE lower(email) = lower(?)", (email,)
+        )
+        conn.commit()
 

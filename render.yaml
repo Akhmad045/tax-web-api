@@ -47,6 +47,26 @@ services:
         value: akhmad23
       - key: ADMIN_PASSWORD
         sync: false
+      # --- Email (SMTP) untuk verifikasi OTP registrasi ---
+      # Nilai rahasia diset lewat dashboard Render (sync: false), bukan di git.
+      # Untuk Gmail pakai App Password, bukan password akun.
+      - key: MAIL_USERNAME
+        sync: false
+      - key: MAIL_PASSWORD
+        sync: false
+      - key: MAIL_FROM
+        sync: false
+      - key: MAIL_PORT
+        value: "587"
+      - key: MAIL_SERVER
+        value: smtp.gmail.com
+      - key: MAIL_STARTTLS
+        value: "True"
+      - key: MAIL_SSL_TLS
+        value: "False"
+      # Masa berlaku kode OTP dalam menit.
+      - key: OTP_TTL_MINUTES
+        value: "5"
     # disk:
     #   name: tax-data
     #   mountPath: /var/data

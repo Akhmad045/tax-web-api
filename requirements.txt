@@ -20,3 +20,13 @@ bcrypt>=4.0,<6.0
 
 # python-multipart: wajib agar OAuth2PasswordRequestForm bisa membaca form login.
 python-multipart>=0.0.9,<1.0
+
+# --- Registrasi & verifikasi email (OTP) ---
+# fastapi-mail: pengiriman email SMTP.
+fastapi-mail>=1.4,<2.0
+
+# python-dotenv: memuat kredensial SMTP dari file .env saat pengembangan.
+python-dotenv>=1.0,<2.0
+
+# email-validator: dipakai pydantic EmailStr untuk memvalidasi format email.
+email-validator>=2.0,<3.0
