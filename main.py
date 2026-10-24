@@ -236,7 +236,7 @@ def pph_badan(payload: PPhBadanRequest):
 # REGISTRASI & VERIFIKASI OTP
 # ---------------------------------------------------------------------------
 
-async def _kirim_otp_latar(
+def _kirim_otp_latar(
     email: str,
     kode: str,
     username: str,
@@ -246,6 +246,12 @@ async def _kirim_otp_latar(
     """
     Pembungkus pengiriman OTP untuk ``BackgroundTasks``.
 
+    Sengaja fungsi biasa (bukan ``async def``): ``email_otp.kirim_otp_email``
+    kini memakai ``httpx`` sinkron untuk memanggil API Brevo. Bila dibungkus
+    ``async def`` tanpa ``await``, panggilan jaringan akan memblokir event loop
+    dan membuat seluruh aplikasi menggantung. Dengan fungsi sinkron,
+    Starlette menjalankannya di threadpool.
+
     Latar belakang punya konsekuensi: exception di sini TIDAK bisa lagi
     diterjemahkan menjadi HTTP 503, karena response sudah terkirim ke klien.
     Semua error karena itu ditangkap, dicetak lengkap ke log (agar terlihat
@@ -253,9 +259,9 @@ async def _kirim_otp_latar(
     yang bisa membuat request crash.
     """
     try:
-        terkirim = await email_otp.kirim_otp_email(
-            email=email,
-            kode=kode,
+        terkirim = email_otp.kirim_otp_email(
+            email_tujuan=email,
+            kode_otp=kode,
             username=username,
             menit=menit,
         )
@@ -270,7 +276,7 @@ async def _kirim_otp_latar(
     if not terkirim:
         print(
             f"[WARN] OTP {konteks} untuk {email} tidak dikirim lewat email "
-            "(SMTP belum dikonfigurasi). Kode tersedia di log [OTP-DEV]."
+            "(BREVO_API_KEY belum diisi). Kode tersedia di log [OTP-DEV]."
         )
 
 
@@ -288,8 +294,8 @@ async def register(payload: RegisterRequest, background_tasks: BackgroundTasks):
     sampai OTP diverifikasi. Kode OTP dikirim ke email tujuan.
 
     Pengiriman email dijalankan sebagai BACKGROUND TASK: endpoint langsung
-    membalas setelah OTP tersimpan, tanpa menunggu SMTP selesai. Ini
-    menghilangkan request yang menggantung (hang) ketika koneksi SMTP lambat
+    membalas setelah OTP tersimpan, tanpa menunggu API Brevo selesai. Ini
+    menghilangkan request yang menggantung (hang) ketika jaringan lambat
     atau server Render baru bangun dari cold start.
 
     Catatan: menahan pembuatan user sampai verifikasi mencegah username
@@ -417,8 +423,8 @@ async def resend_otp(payload: ResendOtpRequest, background_tasks: BackgroundTask
     Kirim ulang kode OTP untuk pendaftaran yang belum diverifikasi.
 
     Alur: hapus OTP lama -> buat kode baru -> simpan ke DB -> kirim sebagai
-    background task. Response langsung 200 tanpa menunggu SMTP, sama seperti
-    /api/register, sehingga tombol "Kirim Ulang Kode" tidak menggantung.
+    background task. Response langsung 200 tanpa menunggu API Brevo, sama
+    seperti /api/register, sehingga tombol "Kirim Ulang Kode" tidak menggantung.
 
     Cooldown 60 detik dijaga di sisi frontend. Di backend hanya divalidasi
     bahwa pendaftaran yang dimaksud memang masih ada; email yang tidak punya
@@ -496,7 +502,7 @@ async def forgot_password(payload: ForgotPasswordRequest, background_tasks: Back
     kode = email_otp.buat_kode_otp()
 
     # OTP diterbitkan lebih dulu, pengiriman email dijalankan di latar
-    # belakang agar endpoint ini tidak menggantung saat SMTP lambat.
+    # belakang agar endpoint ini tidak menggantung saat API Brevo lambat.
     database.simpan_otp(email, kode, ttl_minutes=database.OTP_TTL_MINUTES)
 
     background_tasks.add_task(

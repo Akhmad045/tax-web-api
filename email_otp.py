@@ -3,34 +3,28 @@ email_otp.py
 ------------
 Pembuatan kode OTP dan pengiriman email verifikasi.
 
-Konfigurasi SMTP diambil dari environment variable. Untuk Gmail, gunakan
-**App Password** (bukan password akun biasa) karena Google memblokir login
-SMTP dengan password utama:
+Pengiriman email memakai **HTTP API Brevo** (api.brevo.com), bukan SMTP.
+Alasannya: server Render memblokir port SMTP (587 maupun 465) sehingga email
+tidak pernah terkirim. HTTP lewat port 443 selalu terbuka.
 
-    MAIL_USERNAME  = alamat@gmail.com
-    MAIL_PASSWORD  = app password 16 karakter
-    MAIL_FROM      = Tim 3 Kalkulator Pajak <alamat@gmail.com>
-    MAIL_SERVER    = smtp.gmail.com
-    MAIL_PORT      = 465
-    MAIL_STARTTLS  = False
-    MAIL_SSL_TLS   = True
+Konfigurasi diambil dari environment variable:
 
-Port 465 + SSL implisit dipakai secara sengaja: port 587 (STARTTLS)
-diblokir/timeout di Render, sehingga email tidak pernah terkirim walau
-kredensial benar.
+    BREVO_API_KEY   = kunci API dari dashboard Brevo (SMTP & API -> API Keys)
+    BREVO_SENDER    = alamat email pengirim yang SUDAH diverifikasi di Brevo
+    BREVO_SENDER_NAME = (opsional) nama pengirim
 
-Bila konfigurasi email belum diisi (mis. saat pengembangan lokal), kode OTP
-tetap dibuat dan dicetak ke log server agar alur registrasi bisa diuji tanpa
-SMTP. Di produksi, isi env agar OTP benar-benar dikirim.
+``BREVO_SENDER`` harus berupa alamat yang sudah terdaftar/terverifikasi sebagai
+sender di Brevo, kalau tidak API akan menolak dengan 400
+"unrecognised IP address" / "sender not valid".
+
+Bila kunci API belum diisi (mis. saat pengembangan lokal), kode OTP tetap
+dibuat dan dicetak ke log server agar alur registrasi bisa diuji tanpa Brevo.
 """
 
 from __future__ import annotations
 
 import os
-import re
 import secrets
-import traceback
-from email.utils import parseaddr
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -38,114 +32,45 @@ from dotenv import load_dotenv
 # Muat .env bila ada (tidak menimpa env yang sudah diset sistem).
 load_dotenv()
 
-MAIL_USERNAME = os.environ.get("MAIL_USERNAME", "").strip()
-MAIL_PASSWORD = os.environ.get("MAIL_PASSWORD", "").strip()
-MAIL_SERVER = os.environ.get("MAIL_SERVER", "smtp.gmail.com").strip() or "smtp.gmail.com"
-
-# Server kadang diisi "smtp.gmail.com:465" atau berisi skema URL. Ambil host
-# saja agar koneksi tidak menembak hostname yang tidak valid.
-if "://" in MAIL_SERVER:
-    MAIL_SERVER = MAIL_SERVER.split("://", 1)[1]
-MAIL_SERVER = MAIL_SERVER.split("/")[0].split(":")[0] or "smtp.gmail.com"
-
-# --- Port: SSL implisit di 465 ---------------------------------------------
-# Port 587 (STARTTLS) diblokir/timeout di Render, jadi koneksi memakai port
-# 465 dengan SSL implisit. Nilai MAIL_PORT dari env tetap dibaca untuk
-# pelaporan, tetapi koneksi selalu memakai 465.
-_port_env = (os.environ.get("MAIL_PORT") or "465").strip()
-try:
-    _port_dari_env = int(_port_env)
-except ValueError:
-    _port_dari_env = 465
-
-if _port_dari_env != 465:
-    print(
-        f"[EMAIL-WARN] MAIL_PORT={_port_dari_env} diabaikan; dipaksa 465 (SSL) "
-        "karena port 587 diblokir/timeout di Render."
-    )
-
-MAIL_PORT = 465
-MAIL_STARTTLS = False
-MAIL_SSL_TLS = True
-
-APP_NAME = "Tim 3 Kalkulator Pajak"
-
-
-def _normalisasi_mail_from(nilai: str, fallback: str) -> tuple[str, str]:
-    """
-    Pastikan MAIL_FROM memakai format "Nama Aplikasi <email@domain>".
-
-    Menerima tiga bentuk masukan:
-      * "email@gmail.com"                 -> "Tim 3 Kalkulator Pajak <email>"
-      * "Nama <email@gmail.com>"          -> dipakai apa adanya
-      * '"Nama, Inc" <email@domain.com>'  -> nama diberi tanda kutip bila perlu
-    """
-    nilai = (nilai or "").strip()
-    if not nilai:
-        return APP_NAME, fallback
-
-    nama, alamat = parseaddr(nilai)
-    if not alamat:
-        # Bukan alamat email yang valid; jangan kirim sampah ke SMTP.
-        return APP_NAME, fallback
-
-    nama = (nama or "").strip()
-    if not nama:
-        nama = APP_NAME
-    # Kutip nama yang mengandung karakter khusus agar header tetap valid.
-    if re.search(r'[",<>;:@]', nama) and not nama.startswith('"'):
-        nama = '"' + nama.replace('"', "") + '"'
-    return nama, alamat
-
-
-_MAIL_FROM_NAME, _MAIL_FROM_ADDRESS = _normalisasi_mail_from(
-    os.environ.get("MAIL_FROM", ""), MAIL_USERNAME
+BREVO_API_KEY = os.environ.get("BREVO_API_KEY", "").strip()
+BREVO_SENDER = os.environ.get("BREVO_SENDER", "").strip()
+BREVO_SENDER_NAME = (
+    os.environ.get("BREVO_SENDER_NAME", "").strip() or "Tim 3 Kalkulator Pajak"
 )
-# Alamat lengkap, dipakai bila library butuh MAIL_FROM mentah.
-MAIL_FROM = f"{_MAIL_FROM_NAME} <{_MAIL_FROM_ADDRESS}>" if _MAIL_FROM_ADDRESS else ""
+
+BREVO_URL = "https://api.brevo.com/v3/smtp/email"
+
+# Timeout HTTP (detik). API Brevo biasanya merespons < 2 detik; 20 detik sudah
+# sangat longgar dan mencegah request menggantung selamanya.
+BREVO_TIMEOUT = 20.0
 
 
 def email_terkonfigurasi() -> bool:
-    """True bila kredensial SMTP sudah cukup untuk mengirim email."""
-    return bool(MAIL_USERNAME and MAIL_PASSWORD and _MAIL_FROM_ADDRESS)
+    """True bila kunci API Brevo sudah tersedia."""
+    return bool(BREVO_API_KEY)
 
 
 def _peringatan_konfigurasi() -> None:
     """
     Cetak potensi salah konfigurasi sekali saat modul dimuat.
 
-    Kesalahan yang paling sering terjadi pada deploy Render, dan sengaja
-    ditampilkan lebih awal (bukan menunggu SMTP gagal) agar langsung terlihat
-    di Logs setelah restart:
-      * App Password Gmail bukan 16 karakter (masih pakai password akun).
-      * MAIL_FROM berbeda domain/akun dari MAIL_USERNAME (Gmail menolak
-        pengirim yang bukan milik akun yang login -> "Sender address
-        rejected").
+    Ditampilkan lebih awal agar langsung terlihat di Logs Render setelah
+    restart, bukan menunggu percobaan registrasi gagal.
     """
-    if not email_terkonfigurasi():
+    if not BREVO_API_KEY:
+        print(
+            "[EMAIL-WARN] BREVO_API_KEY belum diisi. Email OTP tidak akan "
+            "dikirim; kode hanya dicetak ke log ([OTP-DEV])."
+        )
         return
-
-    if MAIL_SERVER.endswith("gmail.com"):
-        bersih = MAIL_PASSWORD.replace(" ", "")
-        if len(bersih) != 16:
-            print(
-                f"[EMAIL-WARN] MAIL_PASSWORD panjangnya {len(bersih)} karakter; "
-                "App Password Gmail seharusnya 16 karakter. Password akun biasa "
-                "TIDAK bisa dipakai untuk SMTP."
-            )
-        if "@" in MAIL_USERNAME:
-            domain_login = MAIL_USERNAME.rsplit("@", 1)[1].lower()
-            domain_from = _MAIL_FROM_ADDRESS.rsplit("@", 1)[-1].lower()
-            if domain_login != domain_from:
-                print(
-                    f"[EMAIL-WARN] MAIL_FROM ({MAIL_FROM}) memakai domain berbeda "
-                    f"dari MAIL_USERNAME ({MAIL_USERNAME}). Gmail akan menolak "
-                    "pengirim tersebut."
-                )
+    if not BREVO_SENDER:
+        print(
+            "[EMAIL-WARN] BREVO_SENDER belum diisi. Pengiriman akan gagal "
+            "dengan 400 dari Brevo (sender tidak dikenal)."
+        )
 
 
 _peringatan_konfigurasi()
-
 
 
 def buat_kode_otp(panjang: int = 6) -> str:
@@ -156,30 +81,6 @@ def buat_kode_otp(panjang: int = 6) -> str:
     diprediksi dari keluaran sebelumnya.
     """
     return "".join(str(secrets.randbelow(10)) for _ in range(panjang))
-
-
-def _konfigurasi():
-    """
-    Bangun ConnectionConfig fastapi-mail dari environment.
-
-    Koneksi memakai port 465 dengan SSL implisit (STARTTLS mati), karena port
-    587 diblokir/timeout di Render. MAIL_SERVER dan kredensial tetap diambil
-    dari env.
-    """
-    from fastapi_mail import ConnectionConfig
-
-    return ConnectionConfig(
-        MAIL_USERNAME=MAIL_USERNAME,
-        MAIL_PASSWORD=MAIL_PASSWORD,
-        MAIL_FROM=_MAIL_FROM_ADDRESS,
-        MAIL_PORT=465,
-        MAIL_SERVER=MAIL_SERVER,
-        MAIL_STARTTLS=False,
-        MAIL_SSL_TLS=True,
-        MAIL_FROM_NAME=_MAIL_FROM_NAME,
-        USE_CREDENTIALS=True,
-        VALIDATE_CERTS=True,
-    )
 
 
 def _html_otp(kode: str, username: str, menit: int) -> str:
@@ -201,72 +102,97 @@ def _html_otp(kode: str, username: str, menit: int) -> str:
 </div>"""
 
 
-async def kirim_otp_email(email: str, kode: str, username: str, menit: int = 5) -> bool:
+def kirim_otp_email(
+    email_tujuan: str,
+    kode_otp: str,
+    username: str = "",
+    menit: int = 5,
+) -> bool:
     """
-    Kirim kode OTP ke email tujuan.
+    Kirim kode OTP lewat HTTP API Brevo (``POST /v3/smtp/email``).
 
-    Return True bila terkirim. Bila SMTP belum dikonfigurasi, kode dicetak
-    ke log dan fungsi mengembalikan False (bukan melempar error) supaya
-    endpoint registrasi tetap bisa diuji di lokal.
+    Fungsi ini SINKRON (memakai ``httpx.post``). Pemanggil menjalankannya di
+    ``BackgroundTasks``, jadi request pengguna tetap tidak menunggu jaringan.
 
-    Bila SMTP dikonfigurasi tetapi pengiriman gagal, error asli dicetak ke
-    terminal/log (terlihat di dashboard Render -> Logs) lalu exception
-    dilempar ulang agar pemanggil bisa menampilkan pesan yang tepat.
+    Return True bila Brevo menerima (HTTP 2xx). Bila ``BREVO_API_KEY`` belum
+    diisi, kode dicetak ke log dan False dikembalikan (bukan exception) agar
+    registrasi tetap bisa diuji di lokal.
+
+    Bila pengiriman gagal, respons/kesalahan asli dicetak ke terminal
+    (terlihat di Render -> Logs) lalu exception dilempar ulang.
     """
     if not email_terkonfigurasi():
-        # Bukan silent failure: penyebabnya dicetak eksplisit ke log, termasuk
-        # variabel mana yang kosong, supaya salah konfigurasi di Render
-        # langsung kelihatan di tab Logs.
-        kosong = [
-            nama
-            for nama, nilai in (
-                ("MAIL_USERNAME", MAIL_USERNAME),
-                ("MAIL_PASSWORD", MAIL_PASSWORD),
-                ("MAIL_FROM", _MAIL_FROM_ADDRESS),
-            )
-            if not nilai
-        ]
         print(
-            f"[OTP-DEV] SMTP belum dikonfigurasi (env kosong: {', '.join(kosong)}). "
-            f"Kode untuk {email}: {kode} (berlaku {menit} menit). "
-            "Email TIDAK dikirim."
+            f"[OTP-DEV] BREVO_API_KEY belum diisi. Kode untuk {email_tujuan}: "
+            f"{kode_otp} (berlaku {menit} menit). Email TIDAK dikirim."
         )
         return False
 
-    from fastapi_mail import FastMail, MessageSchema, MessageType
+    import httpx
 
-    pesan = MessageSchema(
-        subject="Kode Verifikasi - Tim 3 Kalkulator Pajak",
-        recipients=[email],
-        body=_html_otp(kode, username, menit),
-        subtype=MessageType.html,
-    )
+    headers = {
+        "accept": "application/json",
+        "api-key": BREVO_API_KEY,
+        "content-type": "application/json",
+    }
+
+    payload = {
+        "sender": {
+            "name": BREVO_SENDER_NAME,
+            "email": BREVO_SENDER,
+        },
+        "to": [{"email": email_tujuan}],
+        "subject": "Kode Verifikasi OTP Kalkulator Pajak",
+        # Spesifikasi awal cukup satu baris; detail (nama & masa berlaku)
+        # ditambahkan agar pengguna tidak bingung.
+        "htmlContent": (
+            f"<p>Kode OTP Anda adalah: <b>{kode_otp}</b></p>"
+            + (
+                _html_otp(kode_otp, username, menit)
+                if username
+                else f"<p>Kode berlaku {menit} menit.</p>"
+            )
+        ),
+    }
 
     try:
-        fm = FastMail(_konfigurasi())
-        await fm.send_message(pesan)
+        with httpx.Client(timeout=BREVO_TIMEOUT) as client:
+            respon = client.post(BREVO_URL, headers=headers, json=payload)
+            respon.raise_for_status()
     except Exception as exc:  # noqa: BLE001
-        # Log detail selengkap mungkin supaya penyebabnya jelas di Render:
-        # kredensial salah, App Password belum diset, port diblokir, timeout,
-        # sertifikat TLS ditolak, dsb.
+        # Log selengkap mungkin: status HTTP + body balasan Brevo biasanya
+        # langsung menyebut penyebabnya (mis. "sender not valid",
+        # "unrecognised IP address", API key salah).
         print("[EMAIL-ERROR] ==================== GAGAL KIRIM EMAIL ====================")
-        print(f"[EMAIL-ERROR] Ke       : {email}")
-        print(f"[EMAIL-ERROR] Dari     : {MAIL_FROM}")
-        print(f"[EMAIL-ERROR] Server   : {MAIL_SERVER}:465 (SSL)")
-        print(f"[EMAIL-ERROR] Username : {MAIL_USERNAME or '(kosong)'}")
-        print(f"[EMAIL-ERROR] Password : {'(terisi)' if MAIL_PASSWORD else '(KOSONG!)'}")
+        print("[EMAIL-ERROR] Provider : Brevo HTTP API")
+        print(f"[EMAIL-ERROR] URL      : {BREVO_URL}")
+        print(f"[EMAIL-ERROR] Ke       : {email_tujuan}")
+        print(f"[EMAIL-ERROR] Dari     : {BREVO_SENDER_NAME} <{BREVO_SENDER}>")
+        print(f"[EMAIL-ERROR] API key  : {'(terisi)' if BREVO_API_KEY else '(KOSONG!)'}")
         print(f"[EMAIL-ERROR] Tipe     : {type(exc).__name__}")
         print(f"[EMAIL-ERROR] Pesan    : {exc}")
-        # Beberapa error SMTP menyimpan kode balasan server.
-        kode_smtp = getattr(exc, "code", None) or getattr(exc, "errno", None)
-        if kode_smtp is not None:
-            print(f"[EMAIL-ERROR] Kode SMTP: {kode_smtp}")
-        print("[EMAIL-ERROR] Traceback:")
-        traceback.print_exc()
+
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status is not None:
+            print(f"[EMAIL-ERROR] Status   : {status}")
+            try:
+                print(f"[EMAIL-ERROR] Balasan  : {exc.response.text}")
+            except Exception:  # noqa: BLE001
+                pass
+
         print("[EMAIL-ERROR] =======================================================")
         raise
 
-    print(f"[EMAIL-OK] OTP terkirim ke {email} via {MAIL_SERVER}:465 (SSL)")
+    pesan_id = ""
+    try:
+        pesan_id = respon.json().get("messageId", "")
+    except Exception:  # noqa: BLE001
+        pass
+
+    print(
+        f"[EMAIL-OK] OTP terkirim ke {email_tujuan} via Brevo"
+        + (f" (messageId={pesan_id})" if pesan_id else "")
+    )
     return True
 
 

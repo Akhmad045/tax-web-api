@@ -47,25 +47,16 @@ services:
         value: akhmad23
       - key: ADMIN_PASSWORD
         sync: false
-      # --- Email (SMTP) untuk verifikasi OTP registrasi ---
-      # Nilai rahasia diset lewat dashboard Render (sync: false), bukan di git.
-      # Untuk Gmail pakai App Password, bukan password akun.
-      - key: MAIL_USERNAME
+      # --- Email (HTTP API Brevo) untuk verifikasi OTP registrasi ---
+      # SMTP tidak dipakai karena port 25/465/587 diblokir di Render.
+      # Kedua nilai rahasia diset lewat dashboard Render (sync: false).
+      - key: BREVO_API_KEY
         sync: false
-      - key: MAIL_PASSWORD
+      - key: BREVO_SENDER
         sync: false
-      - key: MAIL_FROM
-        sync: false
-      # 465 = SSL implisit. Port 587 (STARTTLS) diblokir/timeout di Render,
-      # jadi jangan diubah. Nilai 587 akan dipaksa kembali ke 465 oleh aplikasi.
-      - key: MAIL_PORT
-        value: "465"
-      - key: MAIL_SERVER
-        value: smtp.gmail.com
-      - key: MAIL_STARTTLS
-        value: "False"
-      - key: MAIL_SSL_TLS
-        value: "True"
+      # Opsional; default "Tim 3 Kalkulator Pajak" bila tidak diisi.
+      # - key: BREVO_SENDER_NAME
+      #   value: Tim 3 Kalkulator Pajak
       # Masa berlaku kode OTP dalam menit.
       - key: OTP_TTL_MINUTES
         value: "5"
