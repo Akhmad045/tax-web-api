@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 import secrets
+import traceback
 from typing import Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query
@@ -286,7 +287,10 @@ async def register(payload: RegisterRequest):
         # SMTP gagal (kredensial salah, jaringan, dsb). Hapus OTP agar
         # tidak ada kode "yatim" yang tidak pernah sampai ke pengguna.
         database.hapus_otp(email)
-        print(f"[ERROR] Gagal mengirim OTP ke {email}: {exc}")
+        # Cetak error asli + traceback ke log server (Render: tab Logs) supaya
+        # penyebabnya bisa dilihat, bukan hanya pesan 503 ke pengguna.
+        print(f"[ERROR] Gagal mengirim OTP registrasi ke {email}: {type(exc).__name__}: {exc}")
+        traceback.print_exc()
         raise HTTPException(
             status_code=503,
             detail="Gagal mengirim email verifikasi. Coba lagi beberapa saat.",
@@ -413,7 +417,12 @@ async def forgot_password(payload: ForgotPasswordRequest):
         )
     except Exception as exc:  # noqa: BLE001
         database.hapus_otp(email)
-        print(f"[ERROR] Gagal mengirim OTP reset password ke {email}: {exc}")
+        # Sama seperti alur registrasi: tampilkan error aslinya di log.
+        print(
+            "[ERROR] Gagal mengirim OTP reset password ke "
+            f"{email}: {type(exc).__name__}: {exc}"
+        )
+        traceback.print_exc()
         raise HTTPException(
             status_code=503,
             detail="Gagal mengirim email reset password. Coba lagi beberapa saat.",

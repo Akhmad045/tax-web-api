@@ -9,11 +9,15 @@ SMTP dengan password utama:
 
     MAIL_USERNAME  = alamat@gmail.com
     MAIL_PASSWORD  = app password 16 karakter
-    MAIL_FROM      = alamat@gmail.com
+    MAIL_FROM      = Tim 3 Kalkulator Pajak <alamat@gmail.com>
     MAIL_SERVER    = smtp.gmail.com
     MAIL_PORT      = 587
     MAIL_STARTTLS  = True
     MAIL_SSL_TLS   = False
+
+Port 587 + STARTTLS dipakai secara sengaja: port 465 (SMTPS/implicit TLS)
+sering diblokir pada hosting gratis seperti Render, sehingga email tidak
+pernah terkirim walau kredensial benar.
 
 Bila konfigurasi email belum diisi (mis. saat pengembangan lokal), kode OTP
 tetap dibuat dan dicetak ke log server agar alur registrasi bisa diuji tanpa
@@ -23,7 +27,10 @@ SMTP. Di produksi, isi env agar OTP benar-benar dikirim.
 from __future__ import annotations
 
 import os
+import re
 import secrets
+import traceback
+from email.utils import parseaddr
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -33,16 +40,69 @@ load_dotenv()
 
 MAIL_USERNAME = os.environ.get("MAIL_USERNAME", "")
 MAIL_PASSWORD = os.environ.get("MAIL_PASSWORD", "")
-MAIL_FROM = os.environ.get("MAIL_FROM", "") or MAIL_USERNAME
-MAIL_PORT = int(os.environ.get("MAIL_PORT", "587"))
 MAIL_SERVER = os.environ.get("MAIL_SERVER", "smtp.gmail.com")
-MAIL_STARTTLS = os.environ.get("MAIL_STARTTLS", "True").lower() in ("1", "true", "yes")
-MAIL_SSL_TLS = os.environ.get("MAIL_SSL_TLS", "False").lower() in ("1", "true", "yes")
+
+# --- Port: SELALU STARTTLS di 587 -------------------------------------------
+# Bila env MAIL_PORT diisi 465 (atau MAIL_SSL_TLS=True), paksa kembali ke 587
+# + STARTTLS. Ini mencegah deploy lama/Render yang masih menyimpan 465 membuat
+# email gagal terkirim tanpa jejak yang jelas.
+_port_env = (os.environ.get("MAIL_PORT") or "587").strip()
+try:
+    MAIL_PORT = int(_port_env)
+except ValueError:
+    MAIL_PORT = 587
+
+if MAIL_PORT != 587:
+    print(
+        f"[EMAIL-WARN] MAIL_PORT={MAIL_PORT} diabaikan; dipaksa 587 (STARTTLS) "
+        "karena port 465 sering diblokir hosting gratis seperti Render."
+    )
+    MAIL_PORT = 587
+
+MAIL_STARTTLS = True
+MAIL_SSL_TLS = False
+
+APP_NAME = "Tim 3 Kalkulator Pajak"
+
+
+def _normalisasi_mail_from(nilai: str, fallback: str) -> tuple[str, str]:
+    """
+    Pastikan MAIL_FROM memakai format "Nama Aplikasi <email@domain>".
+
+    Menerima tiga bentuk masukan:
+      * "email@gmail.com"                 -> "Tim 3 Kalkulator Pajak <email>"
+      * "Nama <email@gmail.com>"          -> dipakai apa adanya
+      * '"Nama, Inc" <email@domain.com>'  -> nama diberi tanda kutip bila perlu
+    """
+    nilai = (nilai or "").strip()
+    if not nilai:
+        return APP_NAME, fallback
+
+    nama, alamat = parseaddr(nilai)
+    if not alamat:
+        # Bukan alamat email yang valid; jangan kirim sampah ke SMTP.
+        return APP_NAME, fallback
+
+    nama = (nama or "").strip()
+    if not nama:
+        nama = APP_NAME
+    # Kutip nama yang mengandung karakter khusus agar header tetap valid.
+    if re.search(r'[",<>;:@]', nama) and not nama.startswith('"'):
+        nama = '"' + nama.replace('"', "") + '"'
+    return nama, alamat
+
+
+_MAIL_FROM_NAME, _MAIL_FROM_ADDRESS = _normalisasi_mail_from(
+    os.environ.get("MAIL_FROM", ""), MAIL_USERNAME
+)
+# Alamat lengkap, dipakai bila library butuh MAIL_FROM mentah.
+MAIL_FROM = f"{_MAIL_FROM_NAME} <{_MAIL_FROM_ADDRESS}>" if _MAIL_FROM_ADDRESS else ""
 
 
 def email_terkonfigurasi() -> bool:
     """True bila kredensial SMTP sudah cukup untuk mengirim email."""
-    return bool(MAIL_USERNAME and MAIL_PASSWORD and MAIL_FROM)
+    return bool(MAIL_USERNAME and MAIL_PASSWORD and _MAIL_FROM_ADDRESS)
+
 
 
 def buat_kode_otp(panjang: int = 6) -> str:
@@ -56,18 +116,24 @@ def buat_kode_otp(panjang: int = 6) -> str:
 
 
 def _konfigurasi():
-    """Bangun ConnectionConfig fastapi-mail dari environment."""
+    """
+    Bangun ConnectionConfig fastapi-mail dari environment.
+
+    Selalu STARTTLS di port 587. Nilai MAIL_PORT/MAIL_STARTTLS/MAIL_SSL_TLS
+    sengaja tidak dibaca dari env agar konfigurasi 465 yang tersisa di hosting
+    tidak lagi membuat pengiriman gagal.
+    """
     from fastapi_mail import ConnectionConfig
 
     return ConnectionConfig(
         MAIL_USERNAME=MAIL_USERNAME,
         MAIL_PASSWORD=MAIL_PASSWORD,
-        MAIL_FROM=MAIL_FROM,
-        MAIL_PORT=MAIL_PORT,
+        MAIL_FROM=_MAIL_FROM_ADDRESS,
+        MAIL_PORT=587,
         MAIL_SERVER=MAIL_SERVER,
-        MAIL_STARTTLS=MAIL_STARTTLS,
-        MAIL_SSL_TLS=MAIL_SSL_TLS,
-        MAIL_FROM_NAME="Tim 3 Kalkulator Pajak",
+        MAIL_STARTTLS=True,
+        MAIL_SSL_TLS=False,
+        MAIL_FROM_NAME=_MAIL_FROM_NAME,
         USE_CREDENTIALS=True,
         VALIDATE_CERTS=True,
     )
@@ -99,6 +165,10 @@ async def kirim_otp_email(email: str, kode: str, username: str, menit: int = 5) 
     Return True bila terkirim. Bila SMTP belum dikonfigurasi, kode dicetak
     ke log dan fungsi mengembalikan False (bukan melempar error) supaya
     endpoint registrasi tetap bisa diuji di lokal.
+
+    Bila SMTP dikonfigurasi tetapi pengiriman gagal, error asli dicetak ke
+    terminal/log (terlihat di dashboard Render -> Logs) lalu exception
+    dilempar ulang agar pemanggil bisa menampilkan pesan yang tepat.
     """
     if not email_terkonfigurasi():
         print(
@@ -116,8 +186,31 @@ async def kirim_otp_email(email: str, kode: str, username: str, menit: int = 5) 
         subtype=MessageType.html,
     )
 
-    fm = FastMail(_konfigurasi())
-    await fm.send_message(pesan)
+    try:
+        fm = FastMail(_konfigurasi())
+        await fm.send_message(pesan)
+    except Exception as exc:  # noqa: BLE001
+        # Log detail selengkap mungkin supaya penyebabnya jelas di Render:
+        # kredensial salah, App Password belum diset, port diblokir, timeout,
+        # sertifikat TLS ditolak, dsb.
+        print("[EMAIL-ERROR] ==================== GAGAL KIRIM EMAIL ====================")
+        print(f"[EMAIL-ERROR] Ke       : {email}")
+        print(f"[EMAIL-ERROR] Dari     : {MAIL_FROM}")
+        print(f"[EMAIL-ERROR] Server   : {MAIL_SERVER}:587 (STARTTLS)")
+        print(f"[EMAIL-ERROR] Username : {MAIL_USERNAME or '(kosong)'}")
+        print(f"[EMAIL-ERROR] Password : {'(terisi)' if MAIL_PASSWORD else '(KOSONG!)'}")
+        print(f"[EMAIL-ERROR] Tipe     : {type(exc).__name__}")
+        print(f"[EMAIL-ERROR] Pesan    : {exc}")
+        # Beberapa error SMTP menyimpan kode balasan server.
+        kode_smtp = getattr(exc, "code", None) or getattr(exc, "errno", None)
+        if kode_smtp is not None:
+            print(f"[EMAIL-ERROR] Kode SMTP: {kode_smtp}")
+        print("[EMAIL-ERROR] Traceback:")
+        traceback.print_exc()
+        print("[EMAIL-ERROR] =======================================================")
+        raise
+
+    print(f"[EMAIL-OK] OTP terkirim ke {email} via {MAIL_SERVER}:587 (STARTTLS)")
     return True
 
 

@@ -56,6 +56,8 @@ services:
         sync: false
       - key: MAIL_FROM
         sync: false
+      # 587 = STARTTLS. Port 465 diblokir pada paket gratis, jadi jangan
+      # diubah. Nilai 465 akan dipaksa kembali ke 587 oleh aplikasi.
       - key: MAIL_PORT
         value: "587"
       - key: MAIL_SERVER
