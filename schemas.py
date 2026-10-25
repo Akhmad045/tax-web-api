@@ -200,7 +200,12 @@ class RiwayatSimpanRequest(_NumericModel):
     )
     judul: str = Field("", description="Judul tampilan, mis. nama pegawai/perusahaan")
     nama_wajib: str = Field("", description="Nama pegawai / wajib pajak badan")
-    identitas: str = Field("", description="NIK atau NPWP (16 digit)")
+    # AUDIT 2026-10-25: sebelumnya bebas string apa pun, sehingga lewat API
+    # langsung bisa tersimpan identitas bukan 16 digit (frontend memang
+    # sudah memvalidasi, tapi backend tidak boleh mengandalkannya saja).
+    # Kosong tetap diizinkan (modul tanpa identitas), selain itu wajib
+    # tepat 16 digit angka.
+    identitas: str = Field("", description="NIK atau NPWP (16 digit)", pattern=r"^$|^\d{16}$")
     tahun_pajak: str = Field("", description="Tahun pajak, mis. 2025")
     status_ptkp: str = Field("", description="Status PTKP (khusus PPh 21)")
     ringkasan: str = Field("", description="Ringkasan singkat hasil perhitungan")

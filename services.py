@@ -20,8 +20,14 @@ from typing import Any, Dict, List
 # ---------------------------------------------------------------------------
 
 # PTKP setahun berdasarkan status (Rupiah)
+# AUDIT 2026-10-25: TK/1, TK/2, TK/3 sebelumnya hilang dari tabel sehingga
+# panggilan API dengan status sah tersebut ditolak 422 ("tidak dikenal"),
+# padahal nilainya sama dengan K/0, K/1, K/2 (tanggungan yang sama).
 PTKP_TABLE: Dict[str, float] = {
     "TK/0": 54_000_000,
+    "TK/1": 58_500_000,
+    "TK/2": 63_000_000,
+    "TK/3": 67_500_000,
     "K/0": 58_500_000,
     "K/1": 63_000_000,
     "K/2": 67_500_000,
