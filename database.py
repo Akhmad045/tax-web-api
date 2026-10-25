@@ -320,6 +320,35 @@ def hitung_riwayat(modul: Optional[str] = None, username: Optional[str] = None) 
     return int(row["n"]) if row else 0
 
 
+def jumlah_total_pph(
+    modul: Optional[str] = None, username: Optional[str] = None
+) -> float:
+    """
+    Jumlahkan kolom ``total_pph`` (nominal pajak tiap baris riwayat).
+
+    Filter ``modul``/``username`` mengikuti hitung_riwayat: tanpa filter
+    berarti seluruh tabel. Dipakai untuk agregasi dashboard — tidak ada
+    kolom bernama ``nominal_pajak`` di tabel ini; ``total_pph`` adalah
+    kolom nominal pajak yang disimpan tiap perhitungan, dan nilainya
+    diekspos ke API sebagai ``total_nominal_pajak``.
+    """
+    sql = "SELECT COALESCE(SUM(total_pph), 0) AS s FROM riwayat"
+    kondisi: List[str] = []
+    params: List[Any] = []
+    if modul:
+        kondisi.append("modul = ?")
+        params.append(modul)
+    if username:
+        kondisi.append("username = ?")
+        params.append(username)
+    if kondisi:
+        sql += " WHERE " + " AND ".join(kondisi)
+
+    with get_connection() as conn:
+        row = conn.execute(sql, params).fetchone()
+    return float(row["s"]) if row else 0.0
+
+
 def ambil_riwayat_milik(riwayat_id: int, username: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
     Ambil satu baris riwayat dengan pembatasan pemilik.

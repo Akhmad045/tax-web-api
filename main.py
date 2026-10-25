@@ -50,6 +50,7 @@ from schemas import (
     PPhBadanRequest,
     PPhBadanResponse,
     RiwayatDaftarResponse,
+    StatistikDashboard,
     RiwayatItem,
     RiwayatSimpanRequest,
     Token,
@@ -837,7 +838,7 @@ def simpan_riwayat(
     "/api/riwayat",
     response_model=RiwayatDaftarResponse,
     tags=["Riwayat"],
-    summary="Daftar riwayat perhitungan (admin: semua, user: miliknya sendiri)",
+    summary="Daftar riwayat perhitungan (admin saja)",
 )
 def daftar_riwayat(
     modul: Optional[str] = Query(
@@ -857,7 +858,39 @@ def daftar_riwayat(
         )
     items = database.daftar_riwayat(modul=modul, limit=limit, username=None)
     total = database.hitung_riwayat(modul=modul, username=None)
-    return {"total": total, "items": items}
+    total_nominal = database.jumlah_total_pph(modul=modul, username=None)
+    return {
+        "total": total,
+        "total_nominal_pajak": total_nominal,
+        "items": items,
+    }
+
+
+@app.get(
+    "/api/dashboard-statistik",
+    response_model=StatistikDashboard,
+    tags=["Riwayat"],
+    summary="Agregat dashboard: jumlah & total nominal riwayat",
+)
+def dashboard_statistik(
+    user: dict = Depends(auth.get_current_user),
+):
+    """
+    Dipakai Quick Stats Dashboard. Endpoint daftar riwayat (/api/riwayat)
+    hanya untuk admin, sehingga dashboard user biasa tidak bisa
+    mengambil angka dari sana (403) — endpoint ini mengisi kekosongan
+    itu dengan aturan yang sama seperti hak akses riwayat:
+    - admin  : agregat GLOBAL (seluruh baris, seperti daftar admin).
+    - user   : agregat MILIK SENDIRI (filter username dari token).
+    """
+    if user.get("role") == "admin":
+        username = None
+    else:
+        username = user["username"]
+    return {
+        "total": database.hitung_riwayat(username=username),
+        "total_nominal_pajak": database.jumlah_total_pph(username=username),
+    }
 
 
 @app.get(

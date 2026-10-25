@@ -232,7 +232,17 @@ class RiwayatItem(BaseModel):
 
 class RiwayatDaftarResponse(BaseModel):
     total: int
+    # Jumlah nominal pajak (SUM total_pph) dengan filter yang sama
+    # seperti `total` — 0 bila belum ada baris.
+    total_nominal_pajak: float = 0
     items: List[RiwayatItem]
+
+
+class StatistikDashboard(BaseModel):
+    """Agregat ringan untuk Quick Stats Dashboard (bukan daftar)."""
+
+    total: int
+    total_nominal_pajak: float
 # ---------------------------------------------------------------------------
 # AUTENTIKASI & USER
 # ---------------------------------------------------------------------------
