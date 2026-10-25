@@ -70,7 +70,7 @@ app = FastAPI(
 # Daftar origin yang diizinkan diambil dari env CORS_ORIGINS (dipisah koma).
 # Bila env tidak diisi, dipakai daftar default domain produksi di bawah.
 #
-#   CORS_ORIGINS="https://tim3kalkulatorpajak.web.id,https://www.tim3kalkulatorpajak.web.id,http://localhost:5173"
+#   CORS_ORIGINS="https://tim3kalkulatorpajak.web.id,https://www.tim3kalkulatorpajak.web.id,http://localhost:5173,http://localhost,capacitor://localhost"
 #
 # Mengisi env CORS_ORIGINS="*" hanya untuk testing singkat: semua origin
 # diizinkan. Jangan dipakai di produksi.
@@ -78,10 +78,14 @@ app = FastAPI(
 # PENTING: allow_credentials TIDAK boleh True selama allow_origins=["*"].
 # Spesifikasi CORS melarang wildcard pada kredensial; browser akan menolak
 # respons dan aplikasi tampak "gagal koneksi" meski server hidup.
+# Dengan daftar origin eksplisit di bawah (tanpa "*"), allow_credentials
+# di bawah bernilai True, sesuai yang dibutuhkan aplikasi Android.
 CORS_ORIGINS_DEFAULT = [
     "https://tim3kalkulatorpajak.web.id",
     "https://www.tim3kalkulatorpajak.web.id",
     "http://localhost:5173",
+    "http://localhost",
+    "capacitor://localhost",
 ]
 
 _origins_env = os.environ.get("CORS_ORIGINS", "").strip()
