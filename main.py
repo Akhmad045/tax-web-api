@@ -25,7 +25,10 @@ import secrets
 import traceback
 from typing import Optional
 
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
 
@@ -56,6 +59,17 @@ from schemas import (
     UserInfo,
 )
 
+# ---------------------------------------------------------------------------
+# RATE LIMITING (slowapi) & SECURITY HEADERS
+# ---------------------------------------------------------------------------
+# Batas 5 request/menit per IP hanya di endpoint sensitif (login, register,
+# forgot-password, resend-otp) untuk menghambat brute force & spam OTP.
+# Kunci = IP klien (slowapi memakai X-Forwarded-For bila ada, karena Render
+# berada di balik proxy; bila tidak ada, dipakai IP koneksi langsung).
+# Penyimpanan in-memory per proses: cukup untuk satu instance Render free
+# tier; batas ikut ter-reset saat redeploy/restart (diterima, bukan bug).
+limiter = Limiter(key_func=get_remote_address, default_limits=[])
+
 app = FastAPI(
     title="Tax Web API",
     description=(
@@ -64,6 +78,36 @@ app = FastAPI(
     ),
     version="1.0.0",
 )
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+@app.middleware("http")
+async def _security_headers(request: Request, call_next):
+    """
+    Tambahkan security headers ke SETIAP respons.
+
+    - X-Content-Type-Options: nosniff -> cegah MIME-sniffing.
+    - X-Frame-Options: DENY -> cegah clickjacking (aplikasi tidak pernah
+      di-embed di iframe pihak lain).
+    - Strict-Transport-Security -> paksa HTTPS (berlaku karena API berjalan
+      di Render lewat HTTPS; di localhost HTTP header ini diabaikan browser).
+    - Referrer-Policy: strict-origin-when-cross-origin.
+    Header `Server: uvicorn` juga dihapus di sini; lapis kedua adalah flag
+    --no-server-header di Procfile & render.yaml, karena uvicorn menambahkan
+    header Server di luar aplikasi dan tidak selalu bisa dihapus middleware.
+    """
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Strict-Transport-Security"] = (
+        "max-age=31536000; includeSubDomains"
+    )
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    if "server" in response.headers:
+        del response.headers["server"]
+    return response
 
 # Izinkan akses dari frontend (CORS).
 #
@@ -303,7 +347,8 @@ def _kirim_otp_latar(
     tags=["Auth"],
     summary="Daftar akun baru, kirim kode OTP ke email",
 )
-async def register(payload: RegisterRequest, background_tasks: BackgroundTasks):
+@limiter.limit("5/minute")
+async def register(request: Request, payload: RegisterRequest, background_tasks: BackgroundTasks):
     """
     Tahap 1 registrasi.
 
@@ -465,7 +510,8 @@ def verify_otp(payload: VerifyOtpRequest):
     tags=["Auth"],
     summary="Kirim ulang kode OTP verifikasi email",
 )
-async def resend_otp(payload: ResendOtpRequest, background_tasks: BackgroundTasks):
+@limiter.limit("5/minute")
+async def resend_otp(request: Request, payload: ResendOtpRequest, background_tasks: BackgroundTasks):
     """
     Kirim ulang kode OTP untuk pendaftaran yang belum diverifikasi.
 
@@ -525,7 +571,8 @@ async def resend_otp(payload: ResendOtpRequest, background_tasks: BackgroundTask
     tags=["Auth"],
     summary="Kirim kode OTP untuk reset password",
 )
-async def forgot_password(payload: ForgotPasswordRequest, background_tasks: BackgroundTasks):
+@limiter.limit("5/minute")
+async def forgot_password(request: Request, payload: ForgotPasswordRequest, background_tasks: BackgroundTasks):
     """
     Mengirim kode OTP ke email pemilik akun untuk keperluan reset password.
 
@@ -649,7 +696,8 @@ def reset_password(payload: ResetPasswordRequest):
     tags=["Auth"],
     summary="Login dan dapatkan access token JWT (berlaku 8 jam)",
 )
-def login(form_data: OAuth2PasswordRequestForm = Depends()):
+@limiter.limit("5/minute")
+def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends()):
     user = auth.authenticate_user(form_data.username, form_data.password)
     if user is None:
         # Pesan sengaja umum: jangan bocorkan apakah username terdaftar.

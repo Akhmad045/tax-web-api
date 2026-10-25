@@ -41,8 +41,9 @@ class PPh21BulananRequest(_NumericModel):
     jht: float = Field(0, ge=0, description="Potongan JHT per bulan (Rupiah)")
     status_ptkp: str = Field(
         "TK/0",
-        description="Status PTKP: TK/0, K/0, K/1, K/2, K/3",
+        description="Status PTKP: TK/0-3, K/0-3",
         examples=["TK/0"],
+        pattern=r"^(TK/[0-3]|K/[0-3])$",
     )
 
 
@@ -63,8 +64,9 @@ class BulanItem(_NumericModel):
 class PPh21TahunanRequest(BaseModel):
     status_ptkp: str = Field(
         "TK/0",
-        description="Status PTKP: TK/0, K/0, K/1, K/2, K/3",
+        description="Status PTKP: TK/0-3, K/0-3",
         examples=["K/1"],
+        pattern=r"^(TK/[0-3]|K/[0-3])$",
     )
     bulanan: List[BulanItem] = Field(
         ...,
@@ -198,17 +200,17 @@ class RiwayatSimpanRequest(_NumericModel):
         description="Jenis modul: pph21_bulanan | pph21_tahunan | pph_badan",
         examples=["pph21_bulanan"],
     )
-    judul: str = Field("", description="Judul tampilan, mis. nama pegawai/perusahaan")
-    nama_wajib: str = Field("", description="Nama pegawai / wajib pajak badan")
+    judul: str = Field("", description="Judul tampilan, mis. nama pegawai/perusahaan", max_length=200)
+    nama_wajib: str = Field("", description="Nama pegawai / wajib pajak badan", max_length=200)
     # AUDIT 2026-10-25: sebelumnya bebas string apa pun, sehingga lewat API
     # langsung bisa tersimpan identitas bukan 16 digit (frontend memang
     # sudah memvalidasi, tapi backend tidak boleh mengandalkannya saja).
     # Kosong tetap diizinkan (modul tanpa identitas), selain itu wajib
     # tepat 16 digit angka.
     identitas: str = Field("", description="NIK atau NPWP (16 digit)", pattern=r"^$|^\d{16}$")
-    tahun_pajak: str = Field("", description="Tahun pajak, mis. 2025")
-    status_ptkp: str = Field("", description="Status PTKP (khusus PPh 21)")
-    ringkasan: str = Field("", description="Ringkasan singkat hasil perhitungan")
+    tahun_pajak: str = Field("", description="Tahun pajak, mis. 2025", pattern=r"^$|^\d{4}$")
+    status_ptkp: str = Field("", description="Status PTKP (khusus PPh 21)", pattern=r"^$|^(TK/[0-3]|K/[0-3])$")
+    ringkasan: str = Field("", description="Ringkasan singkat hasil perhitungan", max_length=500)
     total_pph: float = Field(0, ge=0, description="Nilai PPh utama (Rupiah)")
     detail: dict = Field(default_factory=dict, description="Payload & hasil lengkap")
 
@@ -254,7 +256,7 @@ class UserInfo(BaseModel):
 class UserBuatRequest(BaseModel):
     username: str = Field(..., min_length=3, max_length=50)
     password: str = Field(..., min_length=8, max_length=72)
-    role: str = Field("user", description="admin | user")
+    role: str = Field("user", description="admin | user", pattern=r"^(admin|user)$")
 
 
 class UserDaftarResponse(BaseModel):
