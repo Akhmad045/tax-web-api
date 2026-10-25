@@ -28,7 +28,6 @@ from typing import Optional
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-from slowapi.util import get_remote_address
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
 
@@ -64,11 +63,33 @@ from schemas import (
 # ---------------------------------------------------------------------------
 # Batas 5 request/menit per IP hanya di endpoint sensitif (login, register,
 # forgot-password, resend-otp) untuk menghambat brute force & spam OTP.
-# Kunci = IP klien (slowapi memakai X-Forwarded-For bila ada, karena Render
-# berada di balik proxy; bila tidak ada, dipakai IP koneksi langsung).
+#
+# Kunci IP TIDAK memakai slowapi.get_remote_address: fungsi itu hanya
+# membaca request.client.host, yang di balik proxy Render adalah IP router
+# (berubah-ubah per koneksi) sehingga limit tidak pernah terpicu di
+# produksi — terbukti saat uji live: 6 request berturut-turut tetap 200.
+# Fungsi di bawah memakai header yang diset proxy, dengan urutan:
+#   1. CF-Connecting-IP (diset Cloudflare, tidak bisa dipalsukan klien)
+#   2. X-Forwarded-For entri pertama (diset router Render)
+#   3. IP koneksi langsung (pengembangan lokal)
+# Catatan jujur: entri X-Forwarded-For bisa dipalsukan klien yang cerdik
+# untuk memutar IP, jadi limit ini best-effort, bukan anti-spoof sempurna;
+# di produksi, CF-Connecting-IP adalah yang paling dapat diandalkan.
 # Penyimpanan in-memory per proses: cukup untuk satu instance Render free
 # tier; batas ikut ter-reset saat redeploy/restart (diterima, bukan bug).
-limiter = Limiter(key_func=get_remote_address, default_limits=[])
+def _ip_klien(request: Request) -> str:
+    cf_ip = request.headers.get("cf-connecting-ip", "").strip()
+    if cf_ip:
+        return cf_ip
+    xff = request.headers.get("x-forwarded-for", "").strip()
+    if xff:
+        return xff.split(",")[0].strip()
+    if request.client and request.client.host:
+        return request.client.host
+    return "127.0.0.1"
+
+
+limiter = Limiter(key_func=_ip_klien, default_limits=[])
 
 app = FastAPI(
     title="Tax Web API",
