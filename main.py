@@ -325,10 +325,28 @@ async def register(payload: RegisterRequest, background_tasks: BackgroundTasks):
     if galat_pw:
         raise HTTPException(status_code=422, detail=galat_pw)
 
-    if database.ambil_user_by_username(username) is not None:
-        raise HTTPException(status_code=409, detail="Username sudah terdaftar")
-    if database.ambil_user_by_email(email) is not None:
-        raise HTTPException(status_code=409, detail="Email sudah terdaftar")
+    # Cek duplikat SEBELUM menyimpan apa pun. Backend ini memakai helper
+    # SQLite di database.py, bukan SQLAlchemy, jadi pengecekan ini adalah
+    # padanan dari db.query(User).filter(...).first() yang diminta:
+    # username/email dicek di tabel users (akun aktif) DAN di tabel
+    # pending_registrasi (pendaftaran yang belum diverifikasi OTP).
+    # Celah lama: register hanya mengecek users, sehingga username/email
+    # yang sama bisa didaftarkan berkali-kali selama belum diverifikasi
+    # (pending lama ditimpa begitu saja oleh simpan_pending_registrasi).
+    # Bila sudah ada pendaftaran pending untuk email/username ini, user
+    # diarahkan memakai tombol "Kirim Ulang Kode" di halaman verifikasi,
+    # bukan mendaftar ulang.
+    if (
+        database.ambil_user_by_username(username) is not None
+        or database.ambil_user_by_email(email) is not None
+        or database.ambil_pending_registrasi(email) is not None
+        or database.ambil_pending_registrasi_by_username(username) is not None
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Username atau email sudah terdaftar. "
+            "Silakan gunakan yang lain.",
+        )
 
     # Buang OTP kedaluwarsa agar tabel tidak menumpuk.
     database.bersihkan_otp_kedaluwarsa()

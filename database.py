@@ -664,6 +664,33 @@ def ambil_pending_registrasi(email: str) -> Optional[Dict[str, Any]]:
     }
 
 
+def ambil_pending_registrasi_by_username(
+    username: str,
+) -> Optional[Dict[str, Any]]:
+    """Ambil data pendaftaran yang menunggu verifikasi berdasarkan username.
+
+    Tabel pending_registrasi hanya punya unique index pada email, bukan
+    username, jadi username yang sama bisa muncul di dua baris pending
+    berbeda (email berbeda) bila tidak dicek di sini. Dipakai /api/register
+    untuk menolak duplikat username sebelum OTP baru diterbitkan.
+    """
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM pending_registrasi WHERE lower(username) = lower(?) "
+            "ORDER BY id DESC LIMIT 1",
+            (username,),
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        "id": row["id"],
+        "username": row["username"],
+        "email": row["email"],
+        "hashed_password": row["hashed_password"],
+        "dibuat_pada": row["dibuat_pada"],
+    }
+
+
 def hapus_pending_registrasi(email: str) -> None:
     """Hapus data pendaftaran setelah berhasil diverifikasi."""
     with get_connection() as conn:
