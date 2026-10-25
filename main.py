@@ -85,6 +85,7 @@ CORS_ORIGINS_DEFAULT = [
     "https://www.tim3kalkulatorpajak.web.id",
     "http://localhost:5173",
     "http://localhost",
+    "https://localhost",
     "capacitor://localhost",
 ]
 
