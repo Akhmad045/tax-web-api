@@ -280,6 +280,7 @@ def _kirim_otp_latar(
             kode_otp=kode,
             nama_user=username,
             menit=menit,
+            konteks=konteks,
         )
     except Exception as exc:  # noqa: BLE001
         print(
@@ -520,6 +521,14 @@ async def forgot_password(payload: ForgotPasswordRequest, background_tasks: Back
     database.bersihkan_otp_kedaluwarsa()
 
     if database.ambil_user_by_email(email) is None:
+        # Log saja, respons tetap sukses (lihat docstring): membedakan di
+        # log Render apakah OTP tidak terkirim karena email tidak terdaftar
+        # (mis. akun hilang setelah redeploy Render yang menghapus SQLite
+        # ephemeral) atau karena Brevo gagal di background task.
+        print(
+            f"[FORGOT] Email {email} tidak terdaftar, OTP reset password "
+            "tidak dikirim. Respons tetap sukses agar tidak membocorkan akun."
+        )
         return {
             "message": "Jika email terdaftar, kode reset password telah dikirim",
             "detail": "Periksa kotak masuk dan folder spam Anda.",
@@ -532,6 +541,10 @@ async def forgot_password(payload: ForgotPasswordRequest, background_tasks: Back
     # OTP diterbitkan lebih dulu, pengiriman email dijalankan di latar
     # belakang agar endpoint ini tidak menggantung saat API Brevo lambat.
     database.simpan_otp(email, kode, ttl_minutes=database.OTP_TTL_MINUTES)
+    print(
+        f"[FORGOT] OTP reset password disimpan untuk {email}, "
+        "background task pengiriman dijadwalkan."
+    )
 
     background_tasks.add_task(
         _kirim_otp_latar,

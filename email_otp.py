@@ -101,25 +101,48 @@ def buat_kode_otp(panjang: int = 6) -> str:
     return "".join(str(secrets.randbelow(10)) for _ in range(panjang))
 
 
-def _html_otp(kode_otp: str, nama_user: str, menit: int = 5) -> str:
+def _html_otp(
+    kode_otp: str,
+    nama_user: str,
+    menit: int = 5,
+    konteks: str = "registrasi",
+) -> str:
     """
     Template HTML email OTP.
 
     Semua styling memakai inline CSS karena Gmail dan klien email lain
     membuang tag ``<style>`` di ``<head>``. Nilai yang disisipkan sudah
     di-escape agar username/kode tidak bisa menyuntikkan markup.
+
+    ``konteks`` membedakan email registrasi dan reset password: sebelumnya
+    email reset password pun berisi kalimat "menyelesaikan pendaftaran",
+    sehingga user bisa mengira email itu salah dan mengabaikannya.
     """
     nama_aman = html.escape(str(nama_user))
     kode_aman = html.escape(str(kode_otp))
+    if konteks == "reset password":
+        judul = "Reset Password"
+        kalimat = (
+            "Gunakan kode berikut untuk mereset password akun "
+            "Tim 3 Kalkulator Pajak:"
+        )
+        abaikan = "Abaikan email ini bila Anda tidak meminta reset password."
+    else:
+        judul = "Verifikasi Email"
+        kalimat = (
+            "Gunakan kode berikut untuk menyelesaikan pendaftaran akun "
+            "Tim 3 Kalkulator Pajak:"
+        )
+        abaikan = "Abaikan email ini bila Anda tidak mendaftar."
     return f"""\
 <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 8px;">
-    <h2 style="color: #1a56db; text-align: center;">Verifikasi Email</h2>
+    <h2 style="color: #1a56db; text-align: center;">{judul}</h2>
     <p style="color: #333; font-size: 16px;">Hai <strong>{nama_aman}</strong>,</p>
-    <p style="color: #333; font-size: 16px;">Gunakan kode berikut untuk menyelesaikan pendaftaran akun Tim 3 Kalkulator Pajak:</p>
+    <p style="color: #333; font-size: 16px;">{kalimat}</p>
     <div style="background-color: #f3f4f6; padding: 20px; text-align: center; border-radius: 8px; margin: 20px 0;">
         <span style="font-size: 32px; font-weight: bold; letter-spacing: 8px; color: #111827;">{kode_aman}</span>
     </div>
-    <p style="color: #6b7280; font-size: 14px;">Kode berlaku {menit} menit. Abaikan email ini bila Anda tidak mendaftar.</p>
+    <p style="color: #6b7280; font-size: 14px;">Kode berlaku {menit} menit. {abaikan}</p>
 </div>"""
 
 
@@ -128,6 +151,7 @@ def kirim_otp_email(
     kode_otp: str,
     nama_user: str = "",
     menit: int = 5,
+    konteks: str = "registrasi",
 ) -> bool:
     """
     Kirim kode OTP lewat HTTP API Brevo (``POST /v3/smtp/email``).
@@ -169,14 +193,21 @@ def kirim_otp_email(
         "content-type": "application/json",
     }
 
+    subject = (
+        "Kode Reset Password Anda"
+        if konteks == "reset password"
+        else "Kode OTP Anda"
+    )
     payload = {
         "sender": {
-            "name": "Tim 3 Kalkulator Pajak",
+            "name": BREVO_SENDER_NAME,
             "email": BREVO_SENDER,
         },
         "to": [{"email": email_tujuan}],
-        "subject": "Kode OTP Anda",
-        "htmlContent": _html_otp(kode_otp, nama_user or "Pengguna", menit),
+        "subject": subject,
+        "htmlContent": _html_otp(
+            kode_otp, nama_user or "Pengguna", menit, konteks=konteks
+        ),
     }
 
     try:
@@ -214,7 +245,7 @@ def kirim_otp_email(
         pass
 
     print(
-        f"[EMAIL-OK] OTP terkirim ke {email_tujuan} via Brevo"
+        f"[EMAIL-OK] OTP {konteks} terkirim ke {email_tujuan} via Brevo"
         + (f" (messageId={pesan_id})" if pesan_id else "")
     )
     return True
