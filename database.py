@@ -1,20 +1,28 @@
 """
 database.py
 -----------
-Penyimpanan riwayat perhitungan menggunakan SQLite bawaan Python
-(tanpa dependensi tambahan).
+Penyimpanan riwayat perhitungan, pengguna, OTP, dan pending registrasi.
+
+DUA BACKEND (dipilih otomatis saat import):
+  - Bila environment ``DATABASE_URL`` diset -> PostgreSQL (psycopg).
+    Dipakai di produksi (mis. Supabase/Neon gratis) agar data permanen.
+  - Bila tidak diset -> SQLite bawaan Python (file lokal).
+    Dipakai untuk pengembangan & pengujian; lokasi file dapat dioverride
+    lewat ``TAX_DB_PATH``.
+
+Seluruh fungsi di modul ini memakai API yang sama untuk kedua backend
+(koneksi dibungkus adaptor kecil yang menerjemahkan placeholder ``?``
+SQLite menjadi ``%s`` PostgreSQL), sehingga main.py/auth.py tidak perlu
+tahu backend mana yang aktif.
+
+CATATAN DEPLOY (Render free tier): filesystem bersifat *ephemeral* —
+SQLite lokal hilang setiap redeploy/restart. JANGAN andalkan SQLite
+untuk produksi; set ``DATABASE_URL`` ke Postgres gratis.
 
 Tabel ``riwayat`` menyimpan satu baris per perhitungan yang disimpan
 pengguna. Seluruh payload request & response disimpan sebagai JSON di
 kolom ``detail`` agar halaman Riwayat bisa menampilkan kembali data
 lengkap tanpa perlu join tabel tambahan.
-
-Lokasi file database dapat dioverride lewat environment variable
-``TAX_DB_PATH`` (berguna untuk pengujian).
-
-CATATAN DEPLOY (Render free tier): filesystem bersifat *ephemeral* —
-data hilang setiap redeploy/restart. Untuk data permanen, mount Render
-Disk (mis. ke /var/data) lalu set ``TAX_DB_PATH=/var/data/tax.db``.
 """
 
 from __future__ import annotations
@@ -22,6 +30,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -32,6 +41,101 @@ from typing import Any, Dict, List, Optional
 
 _DEFAULT_DB = Path(__file__).resolve().parent / "tax.db"
 DB_PATH = Path(os.environ.get("TAX_DB_PATH", _DEFAULT_DB))
+
+
+def _pg_dsn() -> str:
+    """
+    Normalisasi DATABASE_URL untuk PostgreSQL.
+
+    Supabase/Neon mewajibkan koneksi SSL. Bila DSN belum menyebut
+    ``sslmode`` dan host-nya bukan lokal, tambahkan ``sslmode=require``
+    agar koneksi tidak ditolak server. DSN lokal dibiarkan apa adanya.
+    """
+    dsn = os.environ.get("DATABASE_URL", "").strip()
+    if not dsn:
+        return ""
+    try:
+        parsed = urllib.parse.urlparse(dsn)
+        host = (parsed.hostname or "").lower()
+        qs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+        if host not in ("localhost", "127.0.0.1", "::1") and not any(
+            k.lower() == "sslmode" for k, _ in qs
+        ):
+            qs.append(("sslmode", "require"))
+            dsn = urllib.parse.urlunparse(
+                parsed._replace(query=urllib.parse.urlencode(qs))
+            )
+    except Exception:
+        pass  # DSN dibiarkan apa adanya; psycopg akan memberi error jelas
+    return dsn
+
+
+PG_DSN = _pg_dsn()
+_PG = bool(PG_DSN)
+
+# IntegrityError kedua driver, untuk menangkap duplikat username/email
+# tanpa peduli backend mana yang aktif.
+try:
+    from psycopg import errors as _pg_errors
+
+    _INTEGRITY_ERRORS = (sqlite3.IntegrityError, _pg_errors.IntegrityError)
+except Exception:
+    _INTEGRITY_ERRORS = (sqlite3.IntegrityError,)
+
+
+class _PgCursor:
+    """Bungkus cursor psycopg agar API-nya sama dengan sqlite3."""
+
+    def __init__(self, cur):
+        self._cur = cur
+
+    def fetchone(self):
+        return self._cur.fetchone()
+
+    def fetchall(self):
+        return self._cur.fetchall()
+
+    @property
+    def rowcount(self):
+        return self._cur.rowcount
+
+
+class _PgConnection:
+    """
+    Bungkus koneksi psycopg.
+
+    - Menerjemahkan placeholder ``?`` (gaya sqlite3, dipakai di seluruh
+      modul ini) menjadi ``%s`` (gaya psycopg). Aman karena tidak ada
+      literal ``?`` di dalam string SQL modul ini — semua ``?`` adalah
+      placeholder parameter.
+    - Menutup koneksi saat keluar dari ``with`` (penting: Postgres gratis
+      membatasi jumlah koneksi; koneksi yang bocor akan menghabiskan
+      kuota dan membuat request berikutnya gagal).
+    """
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def execute(self, sql, params=()):
+        cur = self._conn.cursor()
+        cur.execute(sql.replace("?", "%s"), params)
+        return _PgCursor(cur)
+
+    def commit(self):
+        self._conn.commit()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            if exc_type is None:
+                self._conn.commit()
+            else:
+                self._conn.rollback()
+        finally:
+            self._conn.close()
+        return False
 
 # Jenis modul yang valid
 MODUL_VALID = ("pph21_bulanan", "pph21_tahunan", "pph_badan")
@@ -44,8 +148,21 @@ MAX_LIMIT = 200
 # KONEKSI
 # ---------------------------------------------------------------------------
 
-def get_connection() -> sqlite3.Connection:
-    """Buka koneksi SQLite dengan row factory berbentuk dict."""
+def get_connection():
+    """
+    Buka koneksi database: PostgreSQL bila DATABASE_URL diset, SQLite
+    bila tidak. Baris selalu berbentuk dict (sqlite3.Row / dict_row).
+    """
+    if _PG:
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+        except ImportError as exc:
+            raise RuntimeError(
+                "DATABASE_URL diset tetapi paket psycopg belum terpasang. "
+                "Jalankan: pip install 'psycopg[binary]'"
+            ) from exc
+        return _PgConnection(psycopg.connect(PG_DSN, row_factory=dict_row))
     # pastikan folder tujuan ada (mis. bila TAX_DB_PATH menunjuk subfolder)
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH))
@@ -53,33 +170,119 @@ def get_connection() -> sqlite3.Connection:
     return conn
 
 
+# Skema tabel sama untuk kedua backend; hanya tipe id & numerik yang
+# berbeda (SQLite: INTEGER AUTOINCREMENT / REAL, Postgres: IDENTITY /
+# DOUBLE PRECISION). Kolom migrasi (username, percobaan, email,
+# is_verified) sudah termasuk di skema awal, jadi database Postgres yang
+# dibuat dari nol tidak butuh migrasi kolom.
+_DDL_RIWAYAT_SQLITE = """
+    CREATE TABLE IF NOT EXISTS riwayat (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        modul         TEXT    NOT NULL,
+        judul         TEXT    NOT NULL,
+        nama_wajib    TEXT    NOT NULL DEFAULT '',
+        identitas     TEXT    NOT NULL DEFAULT '',
+        tahun_pajak   TEXT    NOT NULL DEFAULT '',
+        status_ptkp   TEXT    NOT NULL DEFAULT '',
+        ringkasan     TEXT    NOT NULL DEFAULT '',
+        total_pph     REAL    NOT NULL DEFAULT 0,
+        detail        TEXT    NOT NULL DEFAULT '{}',
+        dibuat_pada   TEXT    NOT NULL,
+        username      TEXT    NOT NULL DEFAULT ''
+    )
+"""
+_DDL_RIWAYAT_PG = """
+    CREATE TABLE IF NOT EXISTS riwayat (
+        id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        modul         TEXT    NOT NULL,
+        judul         TEXT    NOT NULL,
+        nama_wajib    TEXT    NOT NULL DEFAULT '',
+        identitas     TEXT    NOT NULL DEFAULT '',
+        tahun_pajak   TEXT    NOT NULL DEFAULT '',
+        status_ptkp   TEXT    NOT NULL DEFAULT '',
+        ringkasan     TEXT    NOT NULL DEFAULT '',
+        total_pph     DOUBLE PRECISION NOT NULL DEFAULT 0,
+        detail        TEXT    NOT NULL DEFAULT '{}',
+        dibuat_pada   TEXT    NOT NULL,
+        username      TEXT    NOT NULL DEFAULT ''
+    )
+"""
+_DDL_USERS_SQLITE = """
+    CREATE TABLE IF NOT EXISTS users (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        username        TEXT    NOT NULL UNIQUE,
+        hashed_password TEXT    NOT NULL,
+        role            TEXT    NOT NULL DEFAULT 'user',
+        is_active       INTEGER NOT NULL DEFAULT 1,
+        email           TEXT    NOT NULL DEFAULT '',
+        is_verified     INTEGER NOT NULL DEFAULT 0,
+        dibuat_pada     TEXT    NOT NULL
+    )
+"""
+_DDL_USERS_PG = """
+    CREATE TABLE IF NOT EXISTS users (
+        id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        username        TEXT    NOT NULL UNIQUE,
+        hashed_password TEXT    NOT NULL,
+        role            TEXT    NOT NULL DEFAULT 'user',
+        is_active       INTEGER NOT NULL DEFAULT 1,
+        email           TEXT    NOT NULL DEFAULT '',
+        is_verified     INTEGER NOT NULL DEFAULT 0,
+        dibuat_pada     TEXT    NOT NULL
+    )
+"""
+_DDL_OTP_SQLITE = """
+    CREATE TABLE IF NOT EXISTS otp_codes (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        email      TEXT    NOT NULL,
+        code       TEXT    NOT NULL,
+        expires_at TEXT    NOT NULL,
+        dibuat_pada TEXT   NOT NULL,
+        percobaan  INTEGER NOT NULL DEFAULT 0
+    )
+"""
+_DDL_OTP_PG = """
+    CREATE TABLE IF NOT EXISTS otp_codes (
+        id         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        email      TEXT    NOT NULL,
+        code       TEXT    NOT NULL,
+        expires_at TEXT    NOT NULL,
+        dibuat_pada TEXT   NOT NULL,
+        percobaan  INTEGER NOT NULL DEFAULT 0
+    )
+"""
+_DDL_PENDING_SQLITE = """
+    CREATE TABLE IF NOT EXISTS pending_registrasi (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        username        TEXT    NOT NULL,
+        email           TEXT    NOT NULL,
+        hashed_password TEXT    NOT NULL,
+        dibuat_pada     TEXT    NOT NULL
+    )
+"""
+_DDL_PENDING_PG = """
+    CREATE TABLE IF NOT EXISTS pending_registrasi (
+        id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        username        TEXT    NOT NULL,
+        email           TEXT    NOT NULL,
+        hashed_password TEXT    NOT NULL,
+        dibuat_pada     TEXT    NOT NULL
+    )
+"""
+
+
 def init_db() -> None:
-    """Buat tabel riwayat bila belum ada. Aman dipanggil berulang."""
+    """Buat tabel bila belum ada. Aman dipanggil berulang."""
     with get_connection() as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS riwayat (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                modul         TEXT    NOT NULL,
-                judul         TEXT    NOT NULL,
-                nama_wajib    TEXT    NOT NULL DEFAULT '',
-                identitas     TEXT    NOT NULL DEFAULT '',
-                tahun_pajak   TEXT    NOT NULL DEFAULT '',
-                status_ptkp   TEXT    NOT NULL DEFAULT '',
-                ringkasan     TEXT    NOT NULL DEFAULT '',
-                total_pph     REAL    NOT NULL DEFAULT 0,
-                detail        TEXT    NOT NULL DEFAULT '{}',
-                dibuat_pada   TEXT    NOT NULL,
-                username      TEXT    NOT NULL DEFAULT ''
-            )
-            """
-        )
-        # Migrasi: database lama belum punya kolom pemilik data.
-        kolom_riwayat = {r["name"] for r in conn.execute("PRAGMA table_info(riwayat)")}
-        if "username" not in kolom_riwayat:
-            conn.execute(
-                "ALTER TABLE riwayat ADD COLUMN username TEXT NOT NULL DEFAULT ''"
-            )
+        conn.execute(_DDL_RIWAYAT_PG if _PG else _DDL_RIWAYAT_SQLITE)
+        # Migrasi kolom hanya relevan untuk SQLite lama (PRAGMA tidak ada
+        # di Postgres; skema Postgres sudah lengkap sejak awal).
+        if not _PG:
+            kolom_riwayat = {r["name"] for r in conn.execute("PRAGMA table_info(riwayat)")}
+            if "username" not in kolom_riwayat:
+                conn.execute(
+                    "ALTER TABLE riwayat ADD COLUMN username TEXT NOT NULL DEFAULT ''"
+                )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_riwayat_username "
             "ON riwayat(username, id DESC)"
@@ -89,62 +292,30 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_riwayat_dibuat ON riwayat(dibuat_pada DESC)"
         )
         # tabel user untuk autentikasi & RBAC
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                username        TEXT    NOT NULL UNIQUE,
-                hashed_password TEXT    NOT NULL,
-                role            TEXT    NOT NULL DEFAULT 'user',
-                is_active       INTEGER NOT NULL DEFAULT 1,
-                email           TEXT    NOT NULL DEFAULT '',
-                is_verified     INTEGER NOT NULL DEFAULT 0,
-                dibuat_pada     TEXT    NOT NULL
-            )
-            """
-        )
+        conn.execute(_DDL_USERS_PG if _PG else _DDL_USERS_SQLITE)
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)"
         )
 
-        _migrasi_users(conn)
+        if not _PG:
+            _migrasi_users(conn)
 
         # kode OTP untuk verifikasi email saat registrasi
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS otp_codes (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                email      TEXT    NOT NULL,
-                code       TEXT    NOT NULL,
-                expires_at TEXT    NOT NULL,
-                dibuat_pada TEXT   NOT NULL,
-                percobaan  INTEGER NOT NULL DEFAULT 0
-            )
-            """
-        )
-        # Migrasi: tabel lama belum punya penghitung percobaan.
-        kolom_otp = {r["name"] for r in conn.execute("PRAGMA table_info(otp_codes)")}
-        if "percobaan" not in kolom_otp:
-            conn.execute(
-                "ALTER TABLE otp_codes ADD COLUMN percobaan INTEGER NOT NULL DEFAULT 0"
-            )
+        conn.execute(_DDL_OTP_PG if _PG else _DDL_OTP_SQLITE)
+        # Migrasi: tabel SQLite lama belum punya penghitung percobaan.
+        if not _PG:
+            kolom_otp = {r["name"] for r in conn.execute("PRAGMA table_info(otp_codes)")}
+            if "percobaan" not in kolom_otp:
+                conn.execute(
+                    "ALTER TABLE otp_codes ADD COLUMN percobaan INTEGER NOT NULL DEFAULT 0"
+                )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_otp_email ON otp_codes(email)"
         )
 
         # Data pendaftaran yang menunggu verifikasi OTP. User baru masuk ke
         # tabel users setelah kode terbukti benar.
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS pending_registrasi (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                username        TEXT    NOT NULL,
-                email           TEXT    NOT NULL,
-                hashed_password TEXT    NOT NULL,
-                dibuat_pada     TEXT    NOT NULL
-            )
-            """
-        )
+        conn.execute(_DDL_PENDING_PG if _PG else _DDL_PENDING_SQLITE)
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_email "
             "ON pending_registrasi(lower(email))"
@@ -152,7 +323,7 @@ def init_db() -> None:
         conn.commit()
 
 
-def _migrasi_users(conn: sqlite3.Connection) -> None:
+def _migrasi_users(conn) -> None:  # SQLite saja; Postgres diskip di init_db
     """
     Tambahkan kolom baru ke tabel users pada database lama.
 
@@ -197,29 +368,55 @@ def simpan_riwayat(
     detail_json = json.dumps(detail or {}, ensure_ascii=False, default=str)
 
     with get_connection() as conn:
-        cur = conn.execute(
-            """
-            INSERT INTO riwayat
-                (modul, judul, nama_wajib, identitas, tahun_pajak,
-                 status_ptkp, ringkasan, total_pph, detail, dibuat_pada, username)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                modul,
-                judul,
-                nama_wajib or "",
-                identitas or "",
-                tahun_pajak or "",
-                status_ptkp or "",
-                ringkasan or "",
-                float(total_pph or 0),
-                detail_json,
-                dibuat_pada,
-                username or "",
-            ),
-        )
+        if _PG:
+            # Postgres tidak punya lastrowid; ambil id lewat RETURNING.
+            cur = conn.execute(
+                """
+                INSERT INTO riwayat
+                    (modul, judul, nama_wajib, identitas, tahun_pajak,
+                     status_ptkp, ringkasan, total_pph, detail, dibuat_pada, username)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                RETURNING id
+                """,
+                (
+                    modul,
+                    judul,
+                    nama_wajib or "",
+                    identitas or "",
+                    tahun_pajak or "",
+                    status_ptkp or "",
+                    ringkasan or "",
+                    float(total_pph or 0),
+                    detail_json,
+                    dibuat_pada,
+                    username or "",
+                ),
+            )
+            new_id = cur.fetchone()["id"]
+        else:
+            cur = conn.execute(
+                """
+                INSERT INTO riwayat
+                    (modul, judul, nama_wajib, identitas, tahun_pajak,
+                     status_ptkp, ringkasan, total_pph, detail, dibuat_pada, username)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    modul,
+                    judul,
+                    nama_wajib or "",
+                    identitas or "",
+                    tahun_pajak or "",
+                    status_ptkp or "",
+                    ringkasan or "",
+                    float(total_pph or 0),
+                    detail_json,
+                    dibuat_pada,
+                    username or "",
+                ),
+            )
+            new_id = cur.lastrowid
         conn.commit()
-        new_id = cur.lastrowid
 
     row = ambil_riwayat(new_id)
     if row is None:  # pragma: no cover - kondisi tidak mungkin
@@ -227,7 +424,7 @@ def simpan_riwayat(
     return row
 
 
-def _row_ke_dict(row: sqlite3.Row, sertakan_detail: bool = True) -> Dict[str, Any]:
+def _row_ke_dict(row, sertakan_detail: bool = True) -> Dict[str, Any]:
     """Konversi sqlite3.Row menjadi dict Python."""
     data: Dict[str, Any] = {
         "id": row["id"],
@@ -390,7 +587,7 @@ def hapus_riwayat(riwayat_id: int, username: Optional[str] = None) -> bool:
 ROLE_VALID = ("admin", "user")
 
 
-def _user_ke_dict(row: sqlite3.Row, sertakan_hash: bool = False) -> Dict[str, Any]:
+def _user_ke_dict(row, sertakan_hash: bool = False) -> Dict[str, Any]:
     """Konversi baris users menjadi dict. Hash hanya disertakan bila diminta."""
     data: Dict[str, Any] = {
         "id": row["id"],
@@ -455,25 +652,45 @@ def buat_user(
     dibuat_pada = datetime.now(timezone.utc).isoformat(timespec="seconds")
     try:
         with get_connection() as conn:
-            cur = conn.execute(
-                """
-                INSERT INTO users
-                    (username, hashed_password, role, is_active,
-                     email, is_verified, dibuat_pada)
-                VALUES (?, ?, ?, 1, ?, ?, ?)
-                """,
-                (
-                    username,
-                    hashed_password,
-                    role,
-                    email or "",
-                    1 if is_verified else 0,
-                    dibuat_pada,
-                ),
-            )
+            if _PG:
+                cur = conn.execute(
+                    """
+                    INSERT INTO users
+                        (username, hashed_password, role, is_active,
+                         email, is_verified, dibuat_pada)
+                    VALUES (?, ?, ?, 1, ?, ?, ?)
+                    RETURNING id
+                    """,
+                    (
+                        username,
+                        hashed_password,
+                        role,
+                        email or "",
+                        1 if is_verified else 0,
+                        dibuat_pada,
+                    ),
+                )
+                user_id = cur.fetchone()["id"]
+            else:
+                cur = conn.execute(
+                    """
+                    INSERT INTO users
+                        (username, hashed_password, role, is_active,
+                         email, is_verified, dibuat_pada)
+                    VALUES (?, ?, ?, 1, ?, ?, ?)
+                    """,
+                    (
+                        username,
+                        hashed_password,
+                        role,
+                        email or "",
+                        1 if is_verified else 0,
+                        dibuat_pada,
+                    ),
+                )
+                user_id = cur.lastrowid
             conn.commit()
-            user_id = cur.lastrowid
-    except sqlite3.IntegrityError as exc:
+    except _INTEGRITY_ERRORS as exc:
         raise ValueError(f"Username {username!r} sudah terdaftar") from exc
 
     user = ambil_user_by_username(username, sertakan_hash=False)

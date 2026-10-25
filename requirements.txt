@@ -1,8 +1,10 @@
 # Dependensi backend Tax Web API (FastAPI)
 #
-# Catatan: proyek ini TIDAK memakai SQLAlchemy. Penyimpanan riwayat memakai
-# modul `sqlite3` bawaan Python (lihat database.py), jadi tidak perlu
-# driver/ORM tambahan. Menambahkan SQLAlchemy hanya memperlambat build.
+# Catatan: proyek ini TIDAK memakai SQLAlchemy. Penyimpanan memakai modul
+# `database.py` dengan dua backend: SQLite bawaan Python (bila DATABASE_URL
+# tidak diset) dan PostgreSQL lewat driver psycopg (bila DATABASE_URL diset,
+# mis. Supabase/Neon gratis untuk produksi). Menambahkan SQLAlchemy hanya
+# memperlambat build.
 
 fastapi>=0.115,<1.0
 uvicorn[standard]>=0.30,<1.0
@@ -31,6 +33,11 @@ python-dotenv>=1.0,<2.0
 
 # email-validator: dipakai pydantic EmailStr untuk memvalidasi format email.
 email-validator>=2.0,<3.0
+
+# psycopg: driver PostgreSQL untuk database.py bila DATABASE_URL diset.
+# Varian [binary] membawa wheel jadi tidak butuh compiler di Render.
+# Bila DATABASE_URL tidak diset, driver ini tidak pernah dipakai (SQLite).
+psycopg[binary]>=3.1,<4.0
 
 # slowapi: rate limiting per IP (5/menit) di endpoint login/register/forgot-password.
 slowapi>=0.1.9,<1.0
