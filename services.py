@@ -152,7 +152,10 @@ def hitung_pph21_bulanan(
       5. PKP = neto disetahunkan - PTKP  (dibulatkan ke bawah ribuan)
       6. PPh setahun = tarif progresif atas PKP
       7. PPh per bulan = PPh setahun / 12
-      8. THP = neto bulan - PPh per bulan
+      8. THP Kas = bruto bulan - bpjs - jht - PPh per bulan.
+         Biaya jabatan TIDAK ikut memotong THP: ia hanya pengurang
+         pajak (langkah 3, untuk menghitung neto/PKP), bukan potongan
+         kas dari gaji yang diterima pegawai.
     """
     status = status_ptkp.upper().strip()
     ptkp = _get_ptkp(status)
@@ -181,9 +184,11 @@ def hitung_pph21_bulanan(
     pph_setahun = hasil_progresif["total"]
     pph_bulan = _round2(pph_setahun / 12)
 
-    # 7. Take Home Pay: neto bulanan (sudah dikurangi biaya jabatan,
-    #    BPJS, JHT) dikurangi PPh 21 per bulan.
-    thp = _round2(neto_bulan - pph_bulan)
+    # 7. Take Home Pay KAS: yang benar-benar diterima pegawai =
+    #    bruto - BPJS - JHT - PPh. Biaya jabatan sengaja TIDAK dikurangkan
+    #    di sini karena ia bukan potongan kas, melainkan hanya pengurang
+    #    dalam perhitungan neto/PKP (langkah 3).
+    thp = _round2(bruto_bulan - bpjs - jht - pph_bulan)
 
     return {
         "status_ptkp": status,
