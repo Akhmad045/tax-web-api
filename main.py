@@ -716,7 +716,7 @@ def reset_password(payload: ResetPasswordRequest):
     "/api/login",
     response_model=Token,
     tags=["Auth"],
-    summary="Login dan dapatkan access token JWT (berlaku 8 jam)",
+    summary="Login dan dapatkan access token JWT (berlaku 60 menit)",
 )
 @limiter.limit("5/minute")
 def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends()):

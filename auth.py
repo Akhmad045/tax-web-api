@@ -36,8 +36,12 @@ import database
 
 ALGORITHM = "HS256"
 
-# Masa berlaku token: 8 jam (bisa dioverride lewat env JWT_EXPIRE_MINUTES).
-JWT_EXPIRE_MINUTES = int(os.environ.get("JWT_EXPIRE_MINUTES", "480"))
+# Masa berlaku token: 60 menit (bisa dioverride lewat env JWT_EXPIRE_MINUTES).
+# Dipasangkan dengan auto-logout frontend 30 menit idle: user yang idle
+# ditendang frontend di 30 menit, sedangkan user yang AKTIF maksimal 60
+# menit sebelum harus login ulang. Dipilih 60 (bukan 30) karena tidak ada
+# refresh token — JWT 30 menit akan menendang user aktif di tengah kerja.
+JWT_EXPIRE_MINUTES = int(os.environ.get("JWT_EXPIRE_MINUTES", "60"))
 
 # Default hanya untuk pengembangan lokal. Di produksi set JWT_SECRET_KEY.
 JWT_SECRET_KEY = os.environ.get(
